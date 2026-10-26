@@ -1,0 +1,166 @@
+{
+  "name": "Renixx",
+  "scopeName": "source.renixx",
+  "fileTypes": [
+    "rn"
+  ],
+  "patterns": [
+    {
+      "include": "#comments"
+    },
+    {
+      "include": "#strings"
+    },
+    {
+      "include": "#keywords"
+    },
+    {
+      "include": "#functions"
+    },
+    {
+      "include": "#numbers"
+    },
+    {
+      "include": "#operators"
+    }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.line.double-slash.renixx",
+          "match": "//.*$"
+        },
+        {
+          "name": "comment.line.hash.renixx",
+          "match": "#.*$"
+        },
+        {
+          "name": "comment.block.renixx",
+          "begin": "/\\*",
+          "end": "\\*/"
+        }
+      ]
+    },
+    "strings": {
+      "patterns": [
+        {
+          "name": "string.quoted.double.renixx",
+          "begin": "\"",
+          "end": "\"",
+          "patterns": [
+            {
+              "name": "constant.character.escape.renixx",
+              "match": "\\\\."
+            },
+            {
+              "name": "meta.interpolation.renixx",
+              "begin": "\\{",
+              "end": "\\}",
+              "patterns": [
+                {
+                  "include": "$self"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "name": "string.quoted.single.renixx",
+          "begin": "'",
+          "end": "'",
+          "patterns": [
+            {
+              "name": "constant.character.escape.renixx",
+              "match": "\\\\."
+            }
+          ]
+        }
+      ]
+    },
+    "keywords": {
+      "patterns": [
+        {
+          "name": "keyword.control.renixx",
+          "match": "\\b(let|const|if|else|while|for|in|match|case|default|try|catch|finally|throw|return|break|continue|import|from|as|export)\\b"
+        },
+        {
+          "name": "keyword.declaration.renixx",
+          "match": "\\b(fn|class|new|extends)\\b"
+        },
+        {
+          "name": "storage.type.renixx",
+          "match": "\\b(this)\\b"
+        },
+        {
+          "name": "constant.language.renixx",
+          "match": "\\b(true|false|nil)\\b"
+        },
+        {
+          "name": "keyword.operator.logical.renixx",
+          "match": "\\b(and|or|not|is)\\b"
+        }
+      ]
+    },
+    "functions": {
+      "patterns": [
+        {
+          "name": "entity.name.function.renixx",
+          "match": "\\b(fn)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": {
+              "name": "keyword.declaration.renixx"
+            },
+            "2": {
+              "name": "entity.name.function.renixx"
+            }
+          }
+        },
+        {
+          "name": "entity.name.class.renixx",
+          "match": "\\b(class)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": {
+              "name": "keyword.declaration.renixx"
+            },
+            "2": {
+              "name": "entity.name.class.renixx"
+            }
+          }
+        },
+        {
+          "name": "support.function.builtin.renixx",
+          "match": "\\b(print|println|input|len|type|str|int|float|bool|range|abs|min|max|sum|sorted|reversed|enumerate|zip|keys|values)\\b"
+        }
+      ]
+    },
+    "numbers": {
+      "patterns": [
+        {
+          "name": "constant.numeric.hex.renixx",
+          "match": "\\b0[xX][0-9a-fA-F_]+\\b"
+        },
+        {
+          "name": "constant.numeric.binary.renixx",
+          "match": "\\b0[bB][01_]+\\b"
+        },
+        {
+          "name": "constant.numeric.float.renixx",
+          "match": "\\b[0-9][0-9_]*\\.[0-9][0-9_]*(?:[eE][+-]?[0-9]+)?\\b"
+        },
+        {
+          "name": "constant.numeric.integer.renixx",
+          "match": "\\b[0-9][0-9_]*\\b"
+        }
+      ]
+    },
+    "operators": {
+      "patterns": [
+        {
+          "name": "keyword.operator.renixx",
+          "match": "(==|!=|===|!==|<=|>=|&&|\\|\\||\\*\\*|=>|->|\\.\\.|[+\\-*/%<>=!&|^~?:])"
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,78 @@
+{
+  "Print": {
+    "prefix": "print",
+    "body": "print(\"${1}\")",
+    "description": "Print to stdout"
+  },
+  "Function": {
+    "prefix": "fn",
+    "body": [
+      "fn ${1:name}(${2:params}) {",
+      "  ${3}",
+      "}"
+    ],
+    "description": "Function declaration"
+  },
+  "Class": {
+    "prefix": "class",
+    "body": [
+      "class ${1:Name} {",
+      "  fn init(${2}) {",
+      "    ${3}",
+      "  }",
+      "}"
+    ],
+    "description": "Class declaration"
+  },
+  "If": {
+    "prefix": "if",
+    "body": [
+      "if ${1:cond} {",
+      "  ${2}",
+      "} else {",
+      "  ${3}",
+      "}"
+    ],
+    "description": "If/else statement"
+  },
+  "For": {
+    "prefix": "for",
+    "body": [
+      "for ${1:x} in ${2:iterable} {",
+      "  ${3}",
+      "}"
+    ],
+    "description": "For loop"
+  },
+  "While": {
+    "prefix": "while",
+    "body": [
+      "while ${1:cond} {",
+      "  ${2}",
+      "}"
+    ],
+    "description": "While loop"
+  },
+  "Try": {
+    "prefix": "try",
+    "body": [
+      "try {",
+      "  ${1}",
+      "} catch ${2:e} {",
+      "  ${3}",
+      "}"
+    ],
+    "description": "Try/catch"
+  },
+  "Main": {
+    "prefix": "main",
+    "body": [
+      "fn main() {",
+      "  ${1}",
+      "}",
+      "",
+      "main()"
+    ],
+    "description": "Main entry point"
+  }
+}

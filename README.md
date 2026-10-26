@@ -77,6 +77,7 @@ renixx/
   docs/              # specification and grammar
   playground/        # web playground
   tools/             # launchers
+  vscode-renixx/     # VS Code extension
 ```
 
 ## Documentation

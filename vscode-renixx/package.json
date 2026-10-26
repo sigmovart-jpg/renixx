@@ -1,0 +1,52 @@
+{
+  "name": "renixx",
+  "displayName": "Renixx Language Support",
+  "description": "Syntax highlighting, snippets, and language configuration for the Renixx programming language.",
+  "version": "1.0.0",
+  "publisher": "sigmovart-jpg",
+  "engines": {
+    "vscode": "^1.70.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "keywords": [
+    "renixx",
+    "renix",
+    ".rn"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "languages": [
+      {
+        "id": "renixx",
+        "aliases": [
+          "Renixx",
+          "renixx"
+        ],
+        "extensions": [
+          ".rn"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "renixx",
+        "scopeName": "source.renixx",
+        "path": "./syntaxes/renixx.tmLanguage.json"
+      }
+    ],
+    "snippets": [
+      {
+        "language": "renixx",
+        "path": "./snippets/renixx.json"
+      }
+    ]
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/sigmovart-jpg/renixx"
+  },
+  "license": "MIT"
+}
