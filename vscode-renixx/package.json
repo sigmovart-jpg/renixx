@@ -15,7 +15,6 @@
     "renix",
     ".rn"
   ],
-  "main": "./out/extension.js",
   "contributes": {
     "languages": [
       {
