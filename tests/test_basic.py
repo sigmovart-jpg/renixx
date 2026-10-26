@@ -66,3 +66,26 @@ def test_math():
 
 def test_json():
     assert run('print(json.parse(json.stringify({"a":1}))["a"])') == ["1"]
+
+def test_slice():
+    assert run('let xs=[0,1,2,3,4]\nprint(xs[1:3])\nprint(xs[::-1])') == ["[1, 2]", "[4, 3, 2, 1, 0]"]
+
+def test_destructure():
+    assert run('let xs=[10,20]\nlet [a,b]=xs\nprint(a,b)') == ["10 20"]
+
+def test_comp():
+    assert run('let xs=[1,2,3]\nprint([x*2 for x in xs])') == ["[2, 4, 6]"]
+
+def test_methods():
+    assert run('let s="  hi  "\nprint(s.strip().upper())') == ["HI"]
+
+def test_spread():
+    assert run('let xs=[1,2]\nprint([...xs,3])') == ["[1, 2, 3]"]
+
+def test_stack():
+    src = 'fn a(x){return b(x+1)}\nfn b(y){if y>10{throw "boom"}return y}\nprint(a(10))'
+    try:
+        run(src)
+        assert False
+    except Exception as e:
+        assert "boom" in str(e)
