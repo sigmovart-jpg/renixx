@@ -104,6 +104,43 @@ class Parser:
 
     def parse_let(self, is_const):
         kw_tok = self.advance()  # let/const
+        # destructuring: let [a, b] = expr  or  let {a, b} = expr
+        if self.current().type == "LBRACKET":
+            self.advance()
+            names = []
+            while self.current().type != "RBRACKET":
+                self.skip_newlines()
+                if self.current().type != "IDENT":
+                    raise ParseError("Expected name in destructure", self.current().line)
+                names.append(self.advance().value)
+                self.skip_newlines()
+                if self.current().type == "OP" and self.current().value == ",":
+                    self.advance()
+                    continue
+                break
+            self.expect("RBRACKET", "]")
+            if not self.match("OP", "="):
+                raise ParseError("Expected '=' in destructure", kw_tok.line)
+            value = self.parse_expression()
+            return DestructureStmt(kind="list", names=names, value=value, mutable=not is_const, line=kw_tok.line)
+        if self.current().type == "LBRACE":
+            self.advance()
+            names = []
+            while self.current().type != "RBRACE":
+                self.skip_newlines()
+                if self.current().type != "IDENT":
+                    raise ParseError("Expected name in destructure", self.current().line)
+                names.append(self.advance().value)
+                self.skip_newlines()
+                if self.current().type == "OP" and self.current().value == ",":
+                    self.advance()
+                    continue
+                break
+            self.expect("RBRACE", "}")
+            if not self.match("OP", "="):
+                raise ParseError("Expected '=' in destructure", kw_tok.line)
+            value = self.parse_expression()
+            return DestructureStmt(kind="dict", names=names, value=value, mutable=not is_const, line=kw_tok.line)
         if self.current().type != "IDENT":
             raise ParseError("Expected variable name after let/const", kw_tok.line)
         name = self.advance().value
@@ -510,9 +547,49 @@ class Parser:
                 expr = Call(callee=expr, args=args, kwargs=kwargs, line=expr.line)
             elif self.current().type == "LBRACKET":
                 self.advance()
-                idx = self.parse_expression()
-                self.expect("RBRACKET", "]")
-                expr = Index(obj=expr, index=idx, line=expr.line)
+                self.skip_newlines()
+                if self.current().type == "OP" and self.current().value == ":":
+                    # slice [:stop] or [:]
+                    start = None
+                    self.advance()
+                    self.skip_newlines()
+                    stop = None
+                    if not (self.current().type == "OP" and self.current().value == ":") and self.current().type != "RBRACKET":
+                        stop = self.parse_expression()
+                        self.skip_newlines()
+                    step = None
+                    if self.current().type == "OP" and self.current().value == ":":
+                        self.advance()
+                        self.skip_newlines()
+                        if self.current().type != "RBRACKET":
+                            step = self.parse_expression()
+                            self.skip_newlines()
+                    self.expect("RBRACKET", "]")
+                    expr = Slice(obj=expr, start=start, stop=stop, step=step, line=expr.line)
+                else:
+                    idx = self.parse_expression()
+                    self.skip_newlines()
+                    if self.current().type == "OP" and self.current().value == ":":
+                        # slice [start:stop[:step]]
+                        start = idx
+                        self.advance()
+                        self.skip_newlines()
+                        stop = None
+                        if not (self.current().type == "OP" and self.current().value == ":") and self.current().type != "RBRACKET":
+                            stop = self.parse_expression()
+                            self.skip_newlines()
+                        step = None
+                        if self.current().type == "OP" and self.current().value == ":":
+                            self.advance()
+                            self.skip_newlines()
+                            if self.current().type != "RBRACKET":
+                                step = self.parse_expression()
+                                self.skip_newlines()
+                        self.expect("RBRACKET", "]")
+                        expr = Slice(obj=expr, start=start, stop=stop, step=step, line=expr.line)
+                    else:
+                        self.expect("RBRACKET", "]")
+                        expr = Index(obj=expr, index=idx, line=expr.line)
             elif self.current().type == "OP" and self.current().value == ".":
                 self.advance()
                 if self.current().type not in ("IDENT",):
@@ -650,16 +727,47 @@ class Parser:
             return expr
         if tok.type == "LBRACKET":
             self.advance()
-            elems = []
             self.skip_newlines()
-            while self.current().type != "RBRACKET":
-                elems.append(self.parse_expression())
+            if self.current().type == "RBRACKET":
+                self.expect("RBRACKET", "]")
+                return ListLiteral(elements=[], line=tok.line)
+            # spread as first element
+            if self.current().type == "OP" and self.current().value == "...":
+                self.advance()
+                first = Spread(value=self.parse_expression(), line=tok.line)
+            else:
+                first = self.parse_expression()
+            self.skip_newlines()
+            if self.current().type == "KEYWORD" and self.current().value == "for":
+                self.advance()
+                if self.current().type != "IDENT":
+                    raise ParseError("Expected variable in comprehension", self.current().line)
+                var = self.advance().value
+                if not (self.current().type == "KEYWORD" and self.current().value == "in"):
+                    raise ParseError("Expected 'in' in comprehension", self.current().line)
+                self.advance()
+                iterable = self.parse_expression()
                 self.skip_newlines()
-                if self.current().type == "OP" and self.current().value == ",":
+                cond = None
+                if self.current().type == "KEYWORD" and self.current().value == "if":
                     self.advance()
+                    cond = self.parse_expression()
                     self.skip_newlines()
-                    continue
-                break
+                self.expect("RBRACKET", "]")
+                return ListComp(expr=first, var=var, iterable=iterable, cond=cond, line=tok.line)
+            # normal list
+            elems = [first]
+            while self.current().type == "OP" and self.current().value == ",":
+                self.advance()
+                self.skip_newlines()
+                if self.current().type == "RBRACKET":
+                    break
+                if self.current().type == "OP" and self.current().value == "...":
+                    self.advance()
+                    elems.append(Spread(value=self.parse_expression(), line=tok.line))
+                else:
+                    elems.append(self.parse_expression())
+                self.skip_newlines()
             self.expect("RBRACKET", "]")
             return ListLiteral(elements=elems, line=tok.line)
         if tok.type == "LBRACE":
@@ -678,8 +786,36 @@ class Parser:
             if is_dict:
                 self.advance()
                 self.skip_newlines()
-                pairs = []
-                while self.current().type != "RBRACE":
+                # check comprehension: {key: val for var in iterable if cond}
+                # parse first pair first
+                self.skip_newlines()
+                key = self.parse_expression()
+                self.skip_newlines()
+                self.expect("OP", ":")
+                self.skip_newlines()
+                val = self.parse_expression()
+                self.skip_newlines()
+                if self.current().type == "KEYWORD" and self.current().value == "for":
+                    self.advance()
+                    if self.current().type != "IDENT":
+                        raise ParseError("Expected variable", self.current().line)
+                    var = self.advance().value
+                    if not (self.current().type == "KEYWORD" and self.current().value == "in"):
+                        raise ParseError("Expected 'in'", self.current().line)
+                    self.advance()
+                    iterable = self.parse_expression()
+                    self.skip_newlines()
+                    cond = None
+                    if self.current().type == "KEYWORD" and self.current().value == "if":
+                        self.advance()
+                        cond = self.parse_expression()
+                        self.skip_newlines()
+                    self.expect("RBRACE", "}")
+                    return DictComp(key=key, val=val, var=var, iterable=iterable, cond=cond, line=tok.line)
+                # normal dict
+                pairs = [(key, val)]
+                while self.current().type == "OP" and self.current().value == ",":
+                    self.advance()
                     self.skip_newlines()
                     if self.current().type == "RBRACE":
                         break
@@ -690,12 +826,6 @@ class Parser:
                     val = self.parse_expression()
                     pairs.append((key, val))
                     self.skip_newlines()
-                    if self.current().type == "OP" and self.current().value == ",":
-                        self.advance()
-                        self.skip_newlines()
-                        continue
-                    break
-                self.skip_newlines()
                 self.expect("RBRACE", "}")
                 return DictLiteral(pairs=pairs, line=tok.line)
             raise ParseError("Unexpected '{'", tok.line)

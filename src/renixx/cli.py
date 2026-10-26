@@ -4,6 +4,7 @@ import os
 import argparse
 from .interpreter import Interpreter
 from .parser import parse
+from .formatter import format_source
 from .lexer import tokenize
 from .errors import RenixxError
 
@@ -25,6 +26,9 @@ def run_file(path, args):
         program = parse(src)
     except RenixxError as e:
         print(str(e), file=sys.stderr)
+        if getattr(e, "stack", None):
+            for name, line in reversed(e.stack):
+                print("  at %s (line %s)" % (name, line), file=sys.stderr)
         return 1
     interp = Interpreter()
     # inject script path into os module? already via sys.argv
@@ -34,6 +38,9 @@ def run_file(path, args):
         interp.run(program, interp.globals_env)
     except RenixxError as e:
         print(str(e), file=sys.stderr)
+        if getattr(e, "stack", None):
+            for name, line in reversed(e.stack):
+                print("  at %s (line %s)" % (name, line), file=sys.stderr)
         return 1
     except SystemExit as e:
         return e.code if isinstance(e.code, int) else 0
@@ -87,6 +94,9 @@ def repl():
             interp.run(program, interp.globals_env)
         except RenixxError as e:
             print(str(e))
+            if getattr(e, "stack", None):
+                for name, line in reversed(e.stack):
+                    print("  at %s (line %s)" % (name, line))
         except Exception as e:
             print("Error:", e)
         buf = ""
@@ -102,6 +112,9 @@ def check_file(path):
         return 0
     except RenixxError as e:
         print(str(e), file=sys.stderr)
+        if getattr(e, "stack", None):
+            for name, line in reversed(e.stack):
+                print("  at %s (line %s)" % (name, line), file=sys.stderr)
         return 1
 
 def main(argv=None):
@@ -120,6 +133,7 @@ def main(argv=None):
         print("  run <file> [args...]   Run a Renixx program")
         print("  repl                   Start interactive REPL")
         print("  check <file>           Check syntax")
+        print("  fmt <file>             Format source (prints to stdout)")
         print("  version                Show version")
         return 0
     if cmd == "run":
@@ -135,6 +149,26 @@ def main(argv=None):
             print("renixx: missing file", file=sys.stderr)
             return 1
         return check_file(argv[1])
+    if cmd == "fmt":
+        if len(argv) < 2:
+            print("renixx: missing file", file=sys.stderr)
+            return 1
+        path = argv[1]
+        if not os.path.exists(path):
+            print("renixx: file not found: %s" % path, file=sys.stderr)
+            return 1
+        src = open(path, encoding="utf-8").read()
+        try:
+            out = format_source(src)
+        except RenixxError as e:
+            print(str(e), file=sys.stderr)
+            return 1
+        if len(argv) > 2 and argv[2] == "-w":
+            open(path, "w", encoding="utf-8").write(out)
+            print("formatted %s" % path)
+        else:
+            print(out, end="")
+        return 0
     # if first arg is a file, run it
     if os.path.exists(cmd):
         return run_file(cmd, argv[1:])

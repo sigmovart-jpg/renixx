@@ -61,6 +61,13 @@ class Index(Expr):
     obj: Expr = None
     index: Expr = None
 
+@dataclass
+class Slice(Expr):
+    obj: Expr = None
+    start: Optional[Expr] = None
+    stop: Optional[Expr] = None
+    step: Optional[Expr] = None
+
 
 @dataclass
 class Member(Expr):
@@ -71,6 +78,25 @@ class Member(Expr):
 @dataclass
 class ListLiteral(Expr):
     elements: List[Expr] = field(default_factory=list)
+
+@dataclass
+class Spread(Expr):
+    value: Expr = None
+
+@dataclass
+class ListComp(Expr):
+    expr: Expr = None
+    var: str = ""
+    iterable: Expr = None
+    cond: Optional[Expr] = None
+
+@dataclass
+class DictComp(Expr):
+    key: Expr = None
+    val: Expr = None
+    var: str = ""
+    iterable: Expr = None
+    cond: Optional[Expr] = None
 
 
 @dataclass
@@ -138,6 +164,13 @@ class LetStmt(Stmt):
     name: str = ""
     value: Optional[Expr] = None
     mutable: bool = True  # let vs const
+
+@dataclass
+class DestructureStmt(Stmt):
+    kind: str = "list"  # list or dict
+    names: List[str] = field(default_factory=list)
+    value: Optional[Expr] = None
+    mutable: bool = True
 
 
 @dataclass

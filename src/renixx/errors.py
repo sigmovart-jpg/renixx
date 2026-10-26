@@ -22,9 +22,18 @@ class ParseError(RenixxError):
         super().__init__(message, line, col, "ParseError")
 
 
+_CURRENT_STACK = []
+
+def set_current_stack(stack):
+    global _CURRENT_STACK
+    _CURRENT_STACK = stack
+
 class RuntimeError(RenixxError):
-    def __init__(self, message, line=0, col=0):
+    def __init__(self, message, line=0, col=0, stack=None):
         super().__init__(message, line, col, "RuntimeError")
+        if stack is None:
+            stack = list(_CURRENT_STACK)
+        self.stack = stack
 
 
 class ReturnValue(Exception):

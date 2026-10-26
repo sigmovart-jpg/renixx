@@ -78,6 +78,7 @@ class Interpreter:
         self.globals_env = Environment()
         self.current_env = self.globals_env
         self.output = []
+        self.call_stack = []
         self._setup_builtins()
 
     def _setup_builtins(self):
@@ -112,6 +113,9 @@ class Interpreter:
         env.define("json", self._make_json_module(), False)
         env.define("os", self._make_os_module(), False)
         env.define("fs", self._make_fs_module(), False)
+        env.define("re", self._make_re_module(), False)
+        env.define("http", self._make_http_module(), False)
+        env.define("collections", self._make_collections_module(), False)
         # constants
         env.define("true", True, False)
         env.define("false", False, False)
@@ -312,11 +316,41 @@ class Interpreter:
         m["is_dir"] = lambda p: os.path.isdir(p)
         return m
 
+    def _make_re_module(self):
+        import re as _re
+        m = {}
+        m["match"] = lambda pat, s: _re.match(pat, s)
+        m["search"] = lambda pat, s: _re.search(pat, s)
+        m["findall"] = lambda pat, s: _re.findall(pat, s)
+        m["sub"] = lambda pat, repl, s: _re.sub(pat, repl, s)
+        m["split"] = lambda pat, s: _re.split(pat, s)
+        return m
+
+    def _make_http_module(self):
+        import urllib.request as _u
+        m = {}
+        def get(url, headers=None):
+            req = _u.Request(url, headers=headers or {})
+            with _u.urlopen(req) as r:
+                return r.read().decode("utf-8", "replace")
+        m["get"] = get
+        m["post"] = lambda url, data="", headers=None: None
+        return m
+
+    def _make_collections_module(self):
+        from collections import Counter, defaultdict
+        m = {}
+        m["Counter"] = lambda iterable=None: dict(Counter(iterable)) if iterable is not None else {}
+        m["defaultdict"] = lambda factory=None: {}
+        return m
+
     # ---- execution ----
     def run(self, program, env=None):
         if env is None:
             env = self.globals_env
         self.current_env = env
+        from .errors import set_current_stack
+        set_current_stack(self.call_stack)
         for stmt in program.statements:
             self.exec_stmt(stmt, env)
         return None
@@ -332,6 +366,17 @@ class Interpreter:
             if stmt.value is not None:
                 val = self.eval_expr(stmt.value, env)
             env.define(stmt.name, val, mutable=stmt.mutable)
+            return
+        if isinstance(stmt, DestructureStmt):
+            val = self.eval_expr(stmt.value, env)
+            if stmt.kind == "list":
+                for i, name in enumerate(stmt.names):
+                    v = val[i] if i < len(val) else None
+                    env.define(name, v, mutable=stmt.mutable)
+            else:
+                for name in stmt.names:
+                    v = val.get(name) if isinstance(val, dict) else None
+                    env.define(name, v, mutable=stmt.mutable)
             return
         if isinstance(stmt, ExprStmt):
             self.eval_expr(stmt.expr, env)
@@ -609,6 +654,14 @@ class Interpreter:
             if isinstance(obj, (list, tuple, str)):
                 return obj[idx]
             raise RTError("Cannot index %s" % type(obj).__name__, expr.line)
+        if isinstance(expr, Slice):
+            obj = self.eval_expr(expr.obj, env)
+            start = self.eval_expr(expr.start, env) if expr.start is not None else None
+            stop = self.eval_expr(expr.stop, env) if expr.stop is not None else None
+            step = self.eval_expr(expr.step, env) if expr.step is not None else None
+            if isinstance(obj, (list, tuple, str)):
+                return obj[slice(start, stop, step)]
+            raise RTError("Cannot slice %s" % type(obj).__name__, expr.line)
         if isinstance(expr, Member):
             obj = self.eval_expr(expr.obj, env)
             if isinstance(obj, RenixxInstance):
@@ -635,6 +688,59 @@ class Interpreter:
             if isinstance(obj, dict):
                 if expr.name in obj:
                     return obj[expr.name]
+                # dict methods
+                if expr.name == "get":
+                    return lambda k, default=None: obj.get(k, default)
+                if expr.name == "keys":
+                    return lambda: list(obj.keys())
+                if expr.name == "values":
+                    return lambda: list(obj.values())
+                if expr.name == "has":
+                    return lambda k: k in obj
+                raise RTError("No property '%s'" % expr.name, expr.line)
+            if isinstance(obj, list):
+                if expr.name == "push":
+                    return lambda x: (obj.append(x), None)[1]
+                if expr.name == "append":
+                    return lambda x: (obj.append(x), None)[1] or None
+                if expr.name == "pop":
+                    return lambda i=-1: obj.pop(i)
+                if expr.name == "insert":
+                    return lambda i, x: (obj.insert(i, x), None)[1]
+                if expr.name == "remove":
+                    return lambda x: (obj.remove(x), None)[1]
+                if expr.name == "sort":
+                    return lambda: (obj.sort(), None)[1]
+                if expr.name == "reverse":
+                    return lambda: (obj.reverse(), None)[1]
+                if expr.name == "contains":
+                    return lambda x: x in obj
+                if expr.name == "indexOf":
+                    return lambda x: obj.index(x) if x in obj else -1
+                if expr.name == "map":
+                    return lambda f: [f(x) for x in obj]
+                if expr.name == "filter":
+                    return lambda f: [x for x in obj if f(x)]
+                if expr.name == "join":
+                    return lambda sep="": sep.join(self.to_string(x) for x in obj)
+                raise RTError("No property '%s'" % expr.name, expr.line)
+            if isinstance(obj, str):
+                if expr.name == "upper":
+                    return lambda: obj.upper()
+                if expr.name == "lower":
+                    return lambda: obj.lower()
+                if expr.name == "strip":
+                    return lambda: obj.strip()
+                if expr.name == "split":
+                    return lambda sep=None: obj.split(sep)
+                if expr.name == "replace":
+                    return lambda a, b: obj.replace(a, b)
+                if expr.name == "contains":
+                    return lambda x: x in obj
+                if expr.name == "startswith":
+                    return lambda x: obj.startswith(x)
+                if expr.name == "endswith":
+                    return lambda x: obj.endswith(x)
                 raise RTError("No property '%s'" % expr.name, expr.line)
             if isinstance(obj, RenixxClass):
                 # static? 
@@ -644,7 +750,39 @@ class Interpreter:
             except Exception:
                 raise RTError("No property '%s'" % expr.name, expr.line)
         if isinstance(expr, ListLiteral):
-            return [self.eval_expr(e, env) for e in expr.elements]
+            result = []
+            for e in expr.elements:
+                if isinstance(e, Spread):
+                    val = self.eval_expr(e.value, env)
+                    if isinstance(val, (list, tuple)):
+                        result.extend(val)
+                    else:
+                        result.append(val)
+                else:
+                    result.append(self.eval_expr(e, env))
+            return result
+        if isinstance(expr, ListComp):
+            iterable = self.eval_expr(expr.iterable, env)
+            result = []
+            for item in iterable:
+                new_env = Environment(env)
+                new_env.define(expr.var, item, mutable=True)
+                if expr.cond is not None and not self._truthy(self.eval_expr(expr.cond, new_env)):
+                    continue
+                result.append(self.eval_expr(expr.expr, new_env))
+            return result
+        if isinstance(expr, DictComp):
+            iterable = self.eval_expr(expr.iterable, env)
+            result = {}
+            for item in iterable:
+                new_env = Environment(env)
+                new_env.define(expr.var, item, mutable=True)
+                if expr.cond is not None and not self._truthy(self.eval_expr(expr.cond, new_env)):
+                    continue
+                k = self.eval_expr(expr.key, new_env)
+                v = self.eval_expr(expr.val, new_env)
+                result[k] = v
+            return result
         if isinstance(expr, DictLiteral):
             d = {}
             for k, v in expr.pairs:
@@ -737,12 +875,18 @@ class Interpreter:
         # if method, 'this' should be in closure? We'll inject this when creating method. For now, if closure has 'this' keep.
         prev = self.current_env
         self.current_env = env
+        self.call_stack.append((fn.name or "<fn>", getattr(decl, "line", 0)))
+        from .errors import set_current_stack
+        set_current_stack(self.call_stack)
         try:
             self.exec_stmt(decl.body, env)
         except ReturnValue as rv:
             return rv.value
         finally:
+            if self.call_stack:
+                self.call_stack.pop()
             self.current_env = prev
+            set_current_stack(self.call_stack)
         return None
 
     def call_lambda(self, lam, args, kwargs):
@@ -751,11 +895,17 @@ class Interpreter:
         self._bind_params(node.params, args, kwargs, env)
         prev = self.current_env
         self.current_env = env
+        self.call_stack.append(("<lambda>", getattr(node, "line", 0)))
+        from .errors import set_current_stack
+        set_current_stack(self.call_stack)
         try:
             # body is single expression
             return self.eval_expr(node.body, env)
         finally:
+            if self.call_stack:
+                self.call_stack.pop()
             self.current_env = prev
+            set_current_stack(self.call_stack)
 
     def _bind_params(self, params, args, kwargs, env):
         # params: list of (name, default_expr, rest)
