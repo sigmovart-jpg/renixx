@@ -109,24 +109,37 @@ def publish_diagnostics(uri):
     # kept for compatibility; analyze already publishes
     pass
 
-def find_definitions(program):
-    """Return list of (name, kind, line0, col0, end_col0)."""
+def find_definitions(program, text=None):
+    """Return list of (name, kind, line0, col0)."""
     defs = []
     if program is None:
         return defs
+    lines = (text or "").splitlines()
+    def col_of(line_no, name):
+        if line_no < 1 or line_no > len(lines):
+            return 0
+        s = lines[line_no - 1]
+        idx = s.find(name)
+        return idx if idx >= 0 else 0
     for stmt in program.statements:
         if isinstance(stmt, FnDecl) and stmt.name:
-            defs.append((stmt.name, "function", stmt.line - 1, 0))
+            defs.append((stmt.name, "function", stmt.line - 1, col_of(stmt.line, stmt.name)))
         if isinstance(stmt, ClassDecl):
-            defs.append((stmt.name, "class", stmt.line - 1, 0))
+            defs.append((stmt.name, "class", stmt.line - 1, col_of(stmt.line, stmt.name)))
         if isinstance(stmt, LetStmt) and stmt.name:
-            defs.append((stmt.name, "variable", stmt.line - 1, 0))
-    # walk class methods
+            defs.append((stmt.name, "variable", stmt.line - 1, col_of(stmt.line, stmt.name)))
     for stmt in program.statements:
         if isinstance(stmt, ClassDecl):
             for m in stmt.methods:
                 if m.name:
-                    defs.append((m.name, "method", m.line - 1, 0))
+                    defs.append((m.name, "method", m.line - 1, col_of(m.line, m.name)))
+    # also FnDecl with type annotations etc. already covered
+    # DestructureStmt
+    for stmt in program.statements:
+        if isinstance(stmt, DestructureStmt):
+            for name in stmt.names:
+                # best effort: col 0
+                defs.append((name, "variable", stmt.line - 1, 0))
     return defs
 
 def collect_identifiers(program):
@@ -179,6 +192,10 @@ def handle_completion(params):
         items.append({"label": kw, "kind": 14, "detail": "keyword"})
     for b in BUILTINS:
         items.append({"label": b, "kind": 3, "detail": "builtin"})
+    # defined names
+    for name, kind, dline, dcol in find_definitions(program, documents.get(uri, "")):
+        kind_num = 12 if kind == "function" else (5 if kind == "class" else 13 if kind == "variable" else 6)
+        items.append({"label": name, "kind": kind_num, "detail": kind})
     for name in collect_identifiers(program):
         if name and name not in ("this",):
             items.append({"label": name, "kind": 6, "detail": "identifier"})
@@ -277,42 +294,77 @@ def handle_signature_help(params):
         "activeParameter": min(commas, len(sig_params) - 1) if sig_params else 0,
     }
 
+def _word_at(text, line, ch):
+    lines = text.splitlines()
+    if line >= len(lines):
+        return ""
+    s = lines[line]
+    if ch > len(s):
+        ch = len(s)
+    start = ch
+    while start > 0 and (s[start-1].isalnum() or s[start-1] == "_"):
+        start -= 1
+    end = ch
+    while end < len(s) and (s[end].isalnum() or s[end] == "_"):
+        end += 1
+    return s[start:end]
+
+def _identifier_positions(text, name):
+    """Return list of (line0, col0) for identifier tokens equal to name (not in strings/comments)."""
+    res = []
+    try:
+        toks = tokenize(text)
+    except Exception:
+        return res
+    # reconstruct line/col from token.line (1-based) and token.col? token.col may be 0
+    # tokenizer sets col only sometimes; recompute by scanning
+    lines = text.splitlines()
+    # We'll locate each occurrence by walking tokens with a running position
+    # Simpler: for each token, if IDENT/KEYWORD with value==name, find its column in the corresponding line
+    # Track occurrence index per line
+    from collections import defaultdict
+    occ_counter = defaultdict(int)
+    for tok in toks:
+        if tok.type in ("IDENT", "KEYWORD") and tok.value == name:
+            ln = tok.line - 1
+            if 0 <= ln < len(lines):
+                line_text = lines[ln]
+                # find the occurrence index
+                # find all positions of name in line_text
+                positions = []
+                idx = 0
+                while True:
+                    j = line_text.find(name, idx)
+                    if j == -1:
+                        break
+                    left_ok = (j == 0) or not (line_text[j-1].isalnum() or line_text[j-1] == "_")
+                    right_ok = (j + len(name) >= len(line_text)) or not (line_text[j+len(name)].isalnum() or line_text[j+len(name)] == "_")
+                    if left_ok and right_ok:
+                        positions.append(j)
+                    idx = j + 1
+                if positions:
+                    occ = occ_counter[ln]
+                    if occ < len(positions):
+                        col = positions[occ]
+                    else:
+                        col = positions[-1]
+                    occ_counter[ln] += 1
+                    res.append((ln, col))
+    return res
+
 def handle_references(params):
     uri = params["textDocument"]["uri"]
     pos = params["position"]
     text = documents.get(uri, "")
-    lines = text.splitlines()
-    line = pos["line"]
-    ch = pos["character"]
-    word = ""
-    if line < len(lines):
-        s = lines[line]
-        start = ch
-        while start > 0 and (s[start-1].isalnum() or s[start-1] == "_"):
-            start -= 1
-        end = ch
-        while end < len(s) and (s[end].isalnum() or s[end] == "_"):
-            end += 1
-        word = s[start:end]
+    word = _word_at(text, pos["line"], pos["character"])
     if not word:
         return []
-    # search all documents for occurrences
     result = []
     for u, t in documents.items():
-        for i, ln in enumerate(t.splitlines()):
-            # find all occurrences
-            idx = 0
-            while True:
-                j = ln.find(word, idx)
-                if j == -1:
-                    break
-                # word boundary check
-                left_ok = (j == 0) or not (ln[j-1].isalnum() or ln[j-1] == "_")
-                right_ok = (j + len(word) >= len(ln)) or not (ln[j+len(word)].isalnum() or ln[j+len(word)] == "_")
-                if left_ok and right_ok:
-                    result.append({"uri": u, "range": {"start": {"line": i, "character": j},
-                                                      "end": {"line": i, "character": j + len(word)}}})
-                idx = j + 1
+        # only search the same identifier name
+        for (ln, col) in _identifier_positions(t, word):
+            result.append({"uri": u, "range": {"start": {"line": ln, "character": col},
+                                              "end": {"line": ln, "character": col + len(word)}}})
     return result
 
 def handle_rename(params):
@@ -320,23 +372,12 @@ def handle_rename(params):
     pos = params["position"]
     new_name = params["newName"]
     text = documents.get(uri, "")
-    lines = text.splitlines()
-    line = pos["line"]
-    ch = pos["character"]
-    word = ""
-    if line < len(lines):
-        s = lines[line]
-        start = ch
-        while start > 0 and (s[start-1].isalnum() or s[start-1] == "_"):
-            start -= 1
-        end = ch
-        while end < len(s) and (s[end].isalnum() or s[end] == "_"):
-            end += 1
-        word = s[start:end]
-    if not word:
+    word = _word_at(text, pos["line"], pos["character"])
+    if not word or not word.isidentifier():
         return None
     refs = handle_references({"textDocument": {"uri": uri}, "position": pos})
-    # build changes across all docs
+    if not refs:
+        return None
     changes = {}
     for r in refs:
         u = r["uri"]
@@ -358,7 +399,7 @@ def handle_workspace_symbol(params):
     result = []
     for uri, text in documents.items():
         program = asts.get(uri, None)
-        defs = find_definitions(program)
+        defs = find_definitions(program, documents.get(uri, ""))
         for name, kind, dline, dcol in defs:
             if query.lower() in name.lower():
                 sk = 12 if kind == "function" else (5 if kind == "class" else 13)
@@ -400,7 +441,7 @@ def handle_semantic_tokens(params):
                 tokens.append((i, m.start(), m.end() - m.start(), "keyword"))
     # functions/classes names from defs
     program = asts.get(uri, None)
-    defs = find_definitions(program)
+    defs = find_definitions(program, text)
     for name, kind, dline, dcol in defs:
         ttype = "function" if kind in ("function","method") else ("class" if kind == "class" else "variable")
         tokens.append((dline, dcol, len(name), ttype))
@@ -425,11 +466,11 @@ def handle_hover(params):
     lines = text.splitlines()
     line = pos["line"]
     ch = pos["character"]
-    # extract word at position
     word = ""
     if line < len(lines):
         s = lines[line]
-        # find word boundaries
+        if ch > len(s):
+            ch = len(s)
         start = ch
         while start > 0 and (s[start-1].isalnum() or s[start-1] == "_"):
             start -= 1
@@ -462,6 +503,8 @@ def handle_definition(params):
     word = ""
     if line < len(lines):
         s = lines[line]
+        if ch > len(s):
+            ch = len(s)
         start = ch
         while start > 0 and (s[start-1].isalnum() or s[start-1] == "_"):
             start -= 1
@@ -472,7 +515,8 @@ def handle_definition(params):
     if not word:
         return None
     program = asts.get(uri, None)
-    defs = find_definitions(program)
+    text = documents.get(uri, "")
+    defs = find_definitions(program, text)
     for name, kind, dline, dcol in defs:
         if name == word:
             return {"uri": uri, "range": {"start": {"line": dline, "character": dcol},
@@ -482,7 +526,7 @@ def handle_definition(params):
 def handle_document_symbol(params):
     uri = params["textDocument"]["uri"]
     program = asts.get(uri, None)
-    defs = find_definitions(program)
+    defs = find_definitions(program, documents.get(uri, ""))
     out = []
     for name, kind, dline, dcol in defs:
         sk = 12 if kind == "function" else (5 if kind == "class" else 13)

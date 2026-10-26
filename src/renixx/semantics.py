@@ -98,8 +98,6 @@ class SemanticAnalyzer:
             if s.value is not None:
                 self._analyze_expr(s.value, scope)
             if s.name:
-                if scope.lookup(s.name) is not None and s.name not in scope.names:
-                    pass
                 if s.name in scope.names:
                     self._add_diag(s.line, self._col_of(s.line, s.name),
                                    "Variable '%s' already defined in this scope" % s.name, 2)
@@ -108,6 +106,24 @@ class SemanticAnalyzer:
                 if s.type_annot not in TYPE_NAMES:
                     self._add_diag(s.line, self._col_of(s.line, s.type_annot),
                                    "Unknown type '%s'" % s.type_annot, 2)
+                # static type check for literals
+                if s.value is not None and isinstance(s.value, Literal):
+                    actual = None
+                    v = s.value.value
+                    if v is None:
+                        actual = "nil"
+                    elif isinstance(v, bool):
+                        actual = "bool"
+                    elif isinstance(v, int):
+                        actual = "int"
+                    elif isinstance(v, float):
+                        actual = "float"
+                    elif isinstance(v, str):
+                        actual = "string"
+                    if actual is not None and actual != s.type_annot:
+                        col = self._col_of(s.line, s.type_annot)
+                        self._add_diag(s.line, col, "Type error: expected %s, got %s" % (s.type_annot, actual), 1,
+                                       col + len(s.type_annot))
             return
         if isinstance(s, DestructureStmt):
             if s.value is not None:
