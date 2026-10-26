@@ -42,18 +42,36 @@ class SemanticAnalyzer:
         # hoisted names
         self.fn_names = set()
         self.class_names = set()
+        # occurrence tracking per (line, name) for accurate column reporting
+        self._occurrence_counts = {}
 
-    def _col_of(self, line_no, name, occurrence=0):
+    def _col_of(self, line_no, name, occurrence=None):
         # line_no is 1-based
         if line_no < 1 or line_no > len(self.lines):
             return 0
-        s = self.lines[line_no - 1]
-        idx = -1
-        for _ in range(occurrence + 1):
-            idx = s.find(name, idx + 1)
-            if idx == -1:
-                return 0
-        return idx
+        line_text = self.lines[line_no - 1]
+        # find all word-boundary occurrences of name on this line
+        positions = []
+        idx = 0
+        while True:
+            j = line_text.find(name, idx)
+            if j == -1:
+                break
+            left_ok = (j == 0) or not (line_text[j-1].isalnum() or line_text[j-1] == "_")
+            right_ok = (j + len(name) >= len(line_text)) or not (line_text[j+len(name)].isalnum() or line_text[j+len(name)] == "_")
+            if left_ok and right_ok:
+                positions.append(j)
+            idx = j + 1
+        if not positions:
+            return 0
+        if occurrence is None:
+            key = (line_no, name)
+            occ = self._occurrence_counts.get(key, 0)
+            self._occurrence_counts[key] = occ + 1
+            occurrence = occ
+        if occurrence >= len(positions):
+            occurrence = len(positions) - 1
+        return positions[occurrence]
 
     def _add_diag(self, line, col, message, severity=1, end_col=None):
         if end_col is None:
@@ -95,6 +113,10 @@ class SemanticAnalyzer:
             self._analyze_stmts(s.statements, new_scope)
             return
         if isinstance(s, LetStmt):
+            if s.value is not None and s.name:
+                # pre-increment so self-references in value point to usage occurrence
+                key = (s.line, s.name)
+                self._occurrence_counts[key] = self._occurrence_counts.get(key, 0) + 1
             if s.value is not None:
                 self._analyze_expr(s.value, scope)
             if s.name:
