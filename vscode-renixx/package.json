@@ -7,6 +7,10 @@
   "engines": {
     "vscode": "^1.70.0"
   },
+  "activationEvents": [
+    "onLanguage:renixx"
+  ],
+  "main": "./extension.js",
   "categories": [
     "Programming Languages"
   ],
@@ -16,6 +20,16 @@
     ".rn"
   ],
   "contributes": {
+    "configuration": {
+      "title": "Renixx",
+      "properties": {
+        "renixx.pythonPath": {
+          "type": "string",
+          "default": "python",
+          "description": "Path to the Python interpreter with renixx installed."
+        }
+      }
+    },
     "languages": [
       {
         "id": "renixx",
@@ -47,5 +61,11 @@
     "type": "git",
     "url": "https://github.com/sigmovart-jpg/renixx"
   },
-  "license": "MIT"
+  "license": "MIT",
+  "dependencies": {
+    "vscode-languageclient": "^8.1.0"
+  },
+  "scripts": {
+    "install-deps": "npm install"
+  }
 }

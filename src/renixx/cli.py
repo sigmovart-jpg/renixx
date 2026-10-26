@@ -5,6 +5,7 @@ import argparse
 from .interpreter import Interpreter
 from .parser import parse
 from .formatter import format_source
+from .lsp import main as lsp_main
 from .lexer import tokenize
 from .errors import RenixxError
 
@@ -149,6 +150,7 @@ def main(argv=None):
         print("  repl                   Start interactive REPL")
         print("  check <file>           Check syntax")
         print("  fmt <file>             Format source (prints to stdout)")
+        print("  lsp                    Start language server (stdio)")
         print("  version                Show version")
         return 0
     if cmd == "run":
@@ -183,6 +185,9 @@ def main(argv=None):
             print("formatted %s" % path)
         else:
             print(out, end="")
+        return 0
+    if cmd == "lsp":
+        lsp_main()
         return 0
     # if first arg is a file, run it
     if os.path.exists(cmd):
