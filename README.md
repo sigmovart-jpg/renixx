@@ -45,6 +45,7 @@ print("Hello, World!")
 - Comprehensions: `[x*2 for x in xs if x > 0]`
 - String interpolation: `"hello {name}"`
 - Spread: `[...xs, 4]`
+- Optional type annotations: `fn add(a: int, b: int) -> int`
 - Method calls on strings/lists/dicts
 - Stack traces and source-context error messages
 - Formatter: `renixx fmt`
