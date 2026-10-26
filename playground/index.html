@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Renixx Playground</title>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 0; display: grid; grid-template-columns: 1fr 1fr; height: 100vh; }
+  #editor, #output { padding: 12px; box-sizing: border-box; }
+  #editor { display: flex; flex-direction: column; }
+  textarea { flex: 1; font-family: monospace; font-size: 14px; }
+  #output { background: #111; color: #0f0; font-family: monospace; white-space: pre-wrap; overflow: auto; }
+  button { margin: 6px 0; }
+  h1 { margin: 0 0 8px; font-size: 18px; }
+</style>
+</head>
+<body>
+<div id="editor">
+  <h1>Renixx Playground</h1>
+  <button id="run">Run</button>
+  <textarea id="code">fn fib(n) {
+  if n <= 1 { return n }
+  return fib(n - 1) + fib(n - 2)
+}
+
+for i in range(12) {
+  print("fib({i}) = {fib(i)}")
+}</textarea>
+</div>
+<div id="output">Loading Renixx...</div>
+<script src="https://cdn.jsdelivr.net/pyodide/v0.26.0/full/pyodide.js"></script>
+<script>
+const codeEl = document.getElementById('code');
+const outEl = document.getElementById('output');
+const runBtn = document.getElementById('run');
+
+let pyodide = null;
+async function init() {
+  pyodide = await loadPyodide();
+  // load renixx package files
+  const files = ['__init__.py','errors.py','lexer.py','parser.py','ast.py','environment.py','interpreter.py','cli.py'];
+  pyodide.FS.mkdirTree('/home/pyodide/renixx');
+  for (const f of files) {
+    const r = await fetch('../src/renixx/' + f);
+    const t = await r.text();
+    pyodide.FS.writeFile('/home/pyodide/renixx/' + f, t);
+  }
+  await pyodide.runPythonAsync('import sys; sys.path.insert(0, "/home/pyodide")');
+  outEl.textContent = 'Ready.';
+}
+init().catch(e => { outEl.textContent = 'Init error: ' + e; });
+
+runBtn.onclick = async () => {
+  if (!pyodide) { outEl.textContent = 'Not ready yet.'; return; }
+  outEl.textContent = '';
+  try {
+    const src = codeEl.value;
+    await pyodide.runPythonAsync(`
+import io, contextlib
+from renixx.parser import parse
+from renixx.interpreter import Interpreter
+buf = io.StringIO()
+interp = Interpreter()
+interp.output = []
+with contextlib.redirect_stdout(buf):
+    interp.run(parse(${JSON.stringify(src)}))
+out = "\\n".join(interp.output)
+`);
+    const out = pyodide.runPython('out');
+    outEl.textContent = out;
+  } catch (e) {
+    outEl.textContent = String(e);
+  }
+};
+</script>
+</body>
+</html>

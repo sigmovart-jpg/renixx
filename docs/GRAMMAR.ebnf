@@ -1,0 +1,63 @@
+(* Renixx grammar, EBNF *)
+
+program        = { newline } , { statement , { newline | ";" } } ;
+
+statement      = let_stmt | const_stmt | fn_decl | class_decl | if_stmt
+               | while_stmt | for_stmt | match_stmt | try_stmt | return_stmt
+               | throw_stmt | break_stmt | continue_stmt | import_stmt
+               | expr_stmt ;
+
+let_stmt       = "let" , ident , [ "=" , expression ] ;
+const_stmt     = "const" , ident , "=" , expression ;
+fn_decl        = "fn" , [ ident ] , params , block ;
+params         = "(" , [ param , { "," , param } ] , ")" ;
+param          = "..." , ident | ident , [ "=" , expression ] ;
+class_decl     = "class" , ident , [ "extends" , ident ] , block ;
+if_stmt        = "if" , expression , block , [ "else" , ( if_stmt | block ) ] ;
+while_stmt     = "while" , expression , block ;
+for_stmt       = "for" , ( ident , "in" , expression , block
+                          | "(" , [ let_stmt | expr_stmt ] , ";" , [ expression ] , ";" , [ expression ] , ")" , block ) ;
+match_stmt     = "match" , expression , "{" , { match_case } , "}" ;
+match_case     = ( "default" | expression , [ "if" , expression ] ) , "=>" , ( block | statement ) , [ "," ] ;
+try_stmt       = "try" , block , [ "catch" , [ ident ] , block ] , [ "finally" , block ] ;
+return_stmt    = "return" , [ expression ] ;
+throw_stmt     = "throw" , expression ;
+break_stmt     = "break" ;
+continue_stmt  = "continue" ;
+import_stmt    = "import" , string , [ "as" , ident ]
+               | "import" , ident , "from" , string
+               | "from" , string , "import" , ( "*" | ident , { "," , ident } ) ;
+expr_stmt      = expression ;
+
+block          = "{" , { statement , { newline | ";" } } , "}" ;
+
+expression     = assignment ;
+assignment     = ternary , [ ( "=" | "+=" | "-=" | "*=" | "/=" | "%=" ) , assignment ] ;
+ternary        = or_expr , [ "?" , expression , ":" , ternary ] ;
+or_expr        = and_expr , { ( "or" | "||" ) , and_expr } ;
+and_expr       = eq_expr , { ( "and" | "&&" ) , eq_expr } ;
+eq_expr        = cmp_expr , { ( "==" | "!=" | "===" | "!==" ) , cmp_expr } ;
+cmp_expr       = add_expr , { ( "<" | ">" | "<=" | ">=" | "is" | "in" ) , add_expr } ;
+add_expr       = mul_expr , { ( "+" | "-" ) , mul_expr } ;
+mul_expr       = pow_expr , { ( "*" | "/" | "%" ) , pow_expr } ;
+pow_expr       = unary , [ "**" , pow_expr ] ;
+unary          = ( "-" | "+" | "!" | "~" | "not" ) , unary | postfix ;
+postfix        = primary , { call | index | member } ;
+call           = "(" , [ expression , { "," , expression } ] , ")" ;
+index          = "[" , expression , "]" ;
+member         = "." , ident ;
+primary        = number | string | fstring | "true" | "false" | "nil"
+               | ident | "this" | "new" , ident , [ call ]
+               | "fn" , params , block
+               | lambda
+               | "(" , expression , ")"
+               | "[" , [ expression , { "," , expression } ] , "]"
+               | "{" , [ expression , ":" , expression , { "," , expression , ":" , expression } ] , "}" ;
+lambda         = ident , "=>" , expression
+               | "(" , [ param ] , ")" , "=>" , expression ;
+fstring        = interpolated string literal (lexer-level) ;
+
+ident          = [a-zA-Z_][a-zA-Z0-9_]* ;
+number         = integer | float | hex | binary ;
+string         = "'" , { char } , "'" | '"' , { char } , '"' ;
+newline        = "\n" ;

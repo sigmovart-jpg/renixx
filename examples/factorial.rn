@@ -1,0 +1,9 @@
+// Factorial
+fn factorial(n) {
+  if n <= 1 { return 1 }
+  return n * factorial(n - 1)
+}
+
+for n in [0, 1, 5, 10] {
+  print("{n}! = {factorial(n)}")
+}

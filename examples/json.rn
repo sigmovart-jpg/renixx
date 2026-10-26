@@ -1,0 +1,8 @@
+// JSON example
+let data = {"name": "renixx", "version": 1, "tags": ["fast", "simple"]}
+let text = json.stringify(data, 2)
+print(text)
+
+let parsed = json.parse(text)
+print("parsed name:", parsed["name"])
+print("tags:", parsed["tags"])

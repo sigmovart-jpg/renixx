@@ -1,0 +1,23 @@
+// Higher-order functions
+fn map(list, f) {
+  // build manually
+  let out = []
+  for x in list {
+    out = out + [f(x)]
+  }
+  return out
+}
+
+fn filter(list, pred) {
+  let out = []
+  for x in list {
+    if pred(x) { out = out + [x] }
+  }
+  return out
+}
+
+let nums = [1, 2, 3, 4, 5, 6]
+let doubled = map(nums, x => x * 2)
+print("doubled:", doubled)
+let evens = filter(nums, x => x % 2 == 0)
+print("evens:", evens)

@@ -1,0 +1,28 @@
+// Classes and objects
+class Animal {
+  fn init(name, sound) {
+    this.name = name
+    this.sound = sound
+  }
+  fn speak() {
+    print("{this.name} says {this.sound}")
+  }
+}
+
+class Dog extends Animal {
+  fn init(name) {
+    // call parent via new Animal fields
+    this.name = name
+    this.sound = "woof"
+  }
+  fn fetch(item) {
+    print("{this.name} fetches {item}")
+  }
+}
+
+let a = new Animal("Cat", "meow")
+a.speak()
+
+let d = new Dog("Rex")
+d.speak()
+d.fetch("ball")

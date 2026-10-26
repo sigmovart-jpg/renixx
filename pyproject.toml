@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "renixx"
+version = "1.0.0"
+description = "Renixx programming language"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.9"
+authors = [ { name = "Renixx contributors" } ]
+keywords = ["programming-language", "interpreter", "renixx"]
+
+[project.scripts]
+renixx = "renixx.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
