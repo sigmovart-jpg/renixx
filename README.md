@@ -41,9 +41,14 @@ print("Hello, World!")
 - Classes with inheritance (`extends`)
 - Control flow: `if/else`, `while`, `for`, `match`
 - Exception handling: `try/catch/finally`, `throw`
-- Data structures: lists, dicts, ranges
+- Data structures: lists, dicts, ranges, slicing, destructuring
+- Comprehensions: `[x*2 for x in xs if x > 0]`
 - String interpolation: `"hello {name}"`
-- Modules: `math`, `random`, `time`, `json`, `os`, `fs`
+- Spread: `[...xs, 4]`
+- Method calls on strings/lists/dicts
+- Stack traces and source-context error messages
+- Formatter: `renixx fmt`
+- Modules: `math`, `random`, `time`, `json`, `os`, `fs`, `re`, `http`, `collections`
 - Imports from files and built-in modules
 - First-class functions, higher-order functions
 - Clean error messages with line numbers
