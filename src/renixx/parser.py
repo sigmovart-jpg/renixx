@@ -144,10 +144,15 @@ class Parser:
         if self.current().type != "IDENT":
             raise ParseError("Expected variable name after let/const", kw_tok.line)
         name = self.advance().value
+        type_annot = None
+        if self.current().type == "OP" and self.current().value == ":":
+            self.advance()
+            if self.current().type == "IDENT":
+                type_annot = self.advance().value
         value = None
         if self.match("OP", "="):
             value = self.parse_expression()
-        node = LetStmt(name=name, value=value, mutable=not is_const, line=kw_tok.line)
+        node = LetStmt(name=name, value=value, mutable=not is_const, type_annot=type_annot, line=kw_tok.line)
         if is_const:
             node = ConstStmt(name=name, value=value, mutable=False, line=kw_tok.line)
         return node
@@ -159,8 +164,15 @@ class Parser:
             name = self.advance().value
         params = self.parse_params()
         self.skip_newlines()
+        return_type = None
+        if self.current().type == "OP" and self.current().value == "->":
+            self.advance()
+            self.skip_newlines()
+            if self.current().type == "IDENT":
+                return_type = self.advance().value
+        self.skip_newlines()
         body = self.parse_block()
-        return FnDecl(name=name, params=params, body=body, line=kw.line)
+        return FnDecl(name=name, params=params, body=body, return_type=return_type, line=kw.line)
 
     def parse_params(self):
         params = []
@@ -174,13 +186,24 @@ class Parser:
                 self.advance()
                 if self.current().type != "IDENT":
                     raise ParseError("Expected rest param name", self.current().line)
-                params.append((self.advance().value, None, True))
+                pname = self.advance().value
+                annot = None
+                if self.current().type == "OP" and self.current().value == ":":
+                    self.advance()
+                    if self.current().type == "IDENT":
+                        annot = self.advance().value
+                params.append((pname, None, True, annot))
             elif self.current().type == "IDENT":
                 pname = self.advance().value
+                annot = None
+                if self.current().type == "OP" and self.current().value == ":":
+                    self.advance()
+                    if self.current().type == "IDENT":
+                        annot = self.advance().value
                 default = None
                 if self.match("OP", "="):
                     default = self.parse_expression()
-                params.append((pname, default, False))
+                params.append((pname, default, False, annot))
             else:
                 raise ParseError("Expected parameter name", self.current().line)
             self.skip_newlines()
@@ -659,7 +682,7 @@ class Parser:
                 self.advance()
                 self.advance()  # =>
                 body = self.parse_expression()
-                return Lambda(params=[(tok.value, None, False)], body=body, line=tok.line)
+                return Lambda(params=[(tok.value, None, False, None)], body=body, line=tok.line)
             self.advance()
             return Identifier(name=tok.value, line=tok.line)
         if tok.type == "KEYWORD" and tok.value == "this":
@@ -704,7 +727,7 @@ class Parser:
                             default = None
                             if self.match("OP", "="):
                                 default = self.parse_expression()
-                            params.append((pname, default, False))
+                            params.append((pname, default, False, None))
                             if self.current().type == "OP" and self.current().value == ",":
                                 self.advance()
                                 continue

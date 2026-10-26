@@ -22,6 +22,8 @@ class Formatter:
             return self.block(s)
         if isinstance(s, LetStmt):
             r = "let %s" % s.name
+            if getattr(s, "type_annot", None):
+                r += ": " + s.type_annot
             if s.value is not None:
                 r += " = " + self.expr(s.value)
             return self.pad() + r
@@ -45,6 +47,8 @@ class Formatter:
             if s.name:
                 r += " " + s.name
             r += self.params(s.params)
+            if getattr(s, "return_type", None):
+                r += " -> " + s.return_type
             r += " " + self.block(s.body)
             return self.pad() + r
         if isinstance(s, ClassDecl):
@@ -140,13 +144,19 @@ class Formatter:
 
     def params(self, params):
         parts = []
-        for name, default, rest in params:
+        for p in params:
+            name = p[0]
+            default = p[1] if len(p) > 1 else None
+            rest = p[2] if len(p) > 2 else False
+            annot = p[3] if len(p) > 3 else None
+            seg = name
+            if annot:
+                seg += ": " + annot
             if rest:
-                parts.append("..." + name)
-            elif default is not None:
-                parts.append(name + " = " + self.expr(default))
-            else:
-                parts.append(name)
+                seg = "..." + seg
+            if default is not None:
+                seg += " = " + self.expr(default)
+            parts.append(seg)
         return "(" + ", ".join(parts) + ")"
 
     def expr(self, e):

@@ -344,6 +344,28 @@ class Interpreter:
         m["defaultdict"] = lambda factory=None: {}
         return m
 
+    def _type_name(self, v):
+        if v is None: return "nil"
+        if isinstance(v, bool): return "bool"
+        if isinstance(v, int): return "int"
+        if isinstance(v, float): return "float"
+        if isinstance(v, str): return "string"
+        if isinstance(v, list): return "list"
+        if isinstance(v, dict): return "dict"
+        return type(v).__name__
+
+    def _check_type(self, value, annot):
+        if annot is None:
+            return
+        actual = self._type_name(value)
+        if annot != actual:
+            # allow int/float coercion? strict
+            raise RTError("Type error: expected %s, got %s" % (annot, actual))
+
+    def _bind_one(self, env, name, value, annot):
+        self._check_type(value, annot)
+        env.define(name, value, mutable=True)
+
     # ---- execution ----
     def run(self, program, env=None):
         if env is None:
@@ -365,6 +387,8 @@ class Interpreter:
             val = None
             if stmt.value is not None:
                 val = self.eval_expr(stmt.value, env)
+            if getattr(stmt, "type_annot", None):
+                self._check_type(val, stmt.type_annot)
             env.define(stmt.name, val, mutable=stmt.mutable)
             return
         if isinstance(stmt, DestructureStmt):
@@ -881,12 +905,16 @@ class Interpreter:
         try:
             self.exec_stmt(decl.body, env)
         except ReturnValue as rv:
+            if getattr(decl, "return_type", None):
+                self._check_type(rv.value, decl.return_type)
             return rv.value
         finally:
             if self.call_stack:
                 self.call_stack.pop()
             self.current_env = prev
             set_current_stack(self.call_stack)
+        if getattr(decl, "return_type", None):
+            self._check_type(None, decl.return_type)
         return None
 
     def call_lambda(self, lam, args, kwargs):
@@ -908,44 +936,36 @@ class Interpreter:
             set_current_stack(self.call_stack)
 
     def _bind_params(self, params, args, kwargs, env):
-        # params: list of (name, default_expr, rest)
-        # separate rest
         positional = list(args)
-        # handle defaults
-        i = 0
-        nparams = len(params)
-        # find rest index
         rest_idx = None
         for idx, p in enumerate(params):
-            if p[2]:
+            if len(p) >= 3 and p[2]:
                 rest_idx = idx
                 break
-        # bind positional
-        # number of normal params (excluding rest)
-        normal = [p for p in params if not p[2]]
-        # map kwargs
         kw_map = dict(kwargs)
-        # First, bind rest collector
-        # We'll iterate params in order
         ai = 0
-        for idx, (pname, default, is_rest) in enumerate(params):
+        for idx, p in enumerate(params):
+            pname = p[0]
+            default = p[1] if len(p) > 1 else None
+            is_rest = p[2] if len(p) > 2 else False
+            annot = p[3] if len(p) > 3 else None
             if is_rest:
                 # collect remaining positional
                 rest_vals = positional[ai:]
                 # also kwargs not consumed? collect into list of pairs? Keep simple: positional rest
-                env.define(pname, rest_vals, mutable=True)
+                self._bind_one(env, pname, rest_vals, annot)
                 ai = len(positional)
                 continue
             if pname in kw_map:
-                env.define(pname, kw_map.pop(pname), mutable=True)
+                self._bind_one(env, pname, kw_map.pop(pname), annot)
                 continue
             if ai < len(positional):
-                env.define(pname, positional[ai], mutable=True)
+                self._bind_one(env, pname, positional[ai], annot)
                 ai += 1
                 continue
             # default
             if default is not None:
-                env.define(pname, self.eval_expr(default, env), mutable=True)
+                self._bind_one(env, pname, self.eval_expr(default, env), annot)
                 continue
             # missing required
             raise RTError("Missing argument '%s'" % pname)

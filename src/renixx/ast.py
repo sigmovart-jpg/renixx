@@ -164,6 +164,7 @@ class LetStmt(Stmt):
     name: str = ""
     value: Optional[Expr] = None
     mutable: bool = True  # let vs const
+    type_annot: Optional[str] = None
 
 @dataclass
 class DestructureStmt(Stmt):
@@ -184,6 +185,7 @@ class FnDecl(Stmt):
     params: List = field(default_factory=list)
     body: Block = None
     decorators: List[str] = field(default_factory=list)
+    return_type: Optional[str] = None
 
 
 @dataclass
