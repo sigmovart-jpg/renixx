@@ -114,7 +114,18 @@ import "lib.rn"             // file module
 import "lib.rn" as lib
 ```
 
-Built-in modules: `math`, `random`, `time`, `json`, `os`, `fs`.
+Built-in modules: `math`, `random`, `time`, `json`, `os`, `fs`, `re`, `http`,
+`collections`.
+
+## 9.5 Advanced features
+
+- Slicing: `xs[1:4]`, `xs[:3]`, `xs[3:]`, `xs[::2]`, `xs[::-1]`.
+- Destructuring: `let [a, b] = xs`, `let {name, ver} = d`.
+- Comprehensions: `[x*2 for x in xs if x > 0]`, `{k: v for x in xs}`.
+- Spread: `let ys = [...xs, 4, 5]`.
+- Method calls: `"hi".upper()`, `xs.push(1)`, `xs.map(f)`, `d.get(k, default)`.
+- Stack traces on errors with source context.
+- Formatter: `renixx fmt file.rn`.
 
 ## 10. Standard library (selected)
 
