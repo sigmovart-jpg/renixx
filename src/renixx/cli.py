@@ -26,6 +26,11 @@ def run_file(path, args):
         program = parse(src)
     except RenixxError as e:
         print(str(e), file=sys.stderr)
+        # show source context
+        if e.line and 1 <= e.line <= len(src.splitlines()):
+            lines = src.splitlines()
+            print("  | " + lines[e.line - 1], file=sys.stderr)
+            print("  | " + " " * max(0, (e.col or 1) - 1) + "^", file=sys.stderr)
         if getattr(e, "stack", None):
             for name, line in reversed(e.stack):
                 print("  at %s (line %s)" % (name, line), file=sys.stderr)
@@ -38,6 +43,11 @@ def run_file(path, args):
         interp.run(program, interp.globals_env)
     except RenixxError as e:
         print(str(e), file=sys.stderr)
+        # show source context
+        if e.line and 1 <= e.line <= len(src.splitlines()):
+            lines = src.splitlines()
+            print("  | " + lines[e.line - 1], file=sys.stderr)
+            print("  | " + " " * max(0, (e.col or 1) - 1) + "^", file=sys.stderr)
         if getattr(e, "stack", None):
             for name, line in reversed(e.stack):
                 print("  at %s (line %s)" % (name, line), file=sys.stderr)
@@ -112,6 +122,11 @@ def check_file(path):
         return 0
     except RenixxError as e:
         print(str(e), file=sys.stderr)
+        # show source context
+        if e.line and 1 <= e.line <= len(src.splitlines()):
+            lines = src.splitlines()
+            print("  | " + lines[e.line - 1], file=sys.stderr)
+            print("  | " + " " * max(0, (e.col or 1) - 1) + "^", file=sys.stderr)
         if getattr(e, "stack", None):
             for name, line in reversed(e.stack):
                 print("  at %s (line %s)" % (name, line), file=sys.stderr)
