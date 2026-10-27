@@ -108,6 +108,7 @@ class Parser:
         if self.current().type == "LBRACKET":
             self.advance()
             names = []
+            name_col = self.current().col if self.current().type == "IDENT" else 0
             while self.current().type != "RBRACKET":
                 self.skip_newlines()
                 if self.current().type != "IDENT":
@@ -122,10 +123,11 @@ class Parser:
             if not self.match("OP", "="):
                 raise ParseError("Expected '=' in destructure", kw_tok.line)
             value = self.parse_expression()
-            return DestructureStmt(kind="list", names=names, value=value, mutable=not is_const, line=kw_tok.line)
+            return DestructureStmt(kind="list", names=names, value=value, mutable=not is_const, line=kw_tok.line, name_col=name_col)
         if self.current().type == "LBRACE":
             self.advance()
             names = []
+            name_col = self.current().col if self.current().type == "IDENT" else 0
             while self.current().type != "RBRACE":
                 self.skip_newlines()
                 if self.current().type != "IDENT":
@@ -140,39 +142,48 @@ class Parser:
             if not self.match("OP", "="):
                 raise ParseError("Expected '=' in destructure", kw_tok.line)
             value = self.parse_expression()
-            return DestructureStmt(kind="dict", names=names, value=value, mutable=not is_const, line=kw_tok.line)
+            return DestructureStmt(kind="dict", names=names, value=value, mutable=not is_const, line=kw_tok.line, name_col=name_col)
         if self.current().type != "IDENT":
             raise ParseError("Expected variable name after let/const", kw_tok.line)
+        name_col = self.current().col
         name = self.advance().value
         type_annot = None
+        type_annot_col = 0
         if self.current().type == "OP" and self.current().value == ":":
             self.advance()
             if self.current().type == "IDENT":
+                type_annot_col = self.current().col
                 type_annot = self.advance().value
         value = None
         if self.match("OP", "="):
             value = self.parse_expression()
-        node = LetStmt(name=name, value=value, mutable=not is_const, type_annot=type_annot, line=kw_tok.line)
+        node = LetStmt(name=name, value=value, mutable=not is_const, type_annot=type_annot, line=kw_tok.line, name_col=name_col, type_annot_col=type_annot_col)
         if is_const:
-            node = ConstStmt(name=name, value=value, mutable=False, line=kw_tok.line)
+            node = ConstStmt(name=name, value=value, mutable=False, line=kw_tok.line, name_col=name_col, type_annot=type_annot, type_annot_col=type_annot_col)
         return node
 
     def parse_fn_decl(self):
         kw = self.advance()  # fn
         name = None
+        name_col = 0
         if self.current().type == "IDENT":
+            name_col = self.current().col
             name = self.advance().value
         params = self.parse_params()
         self.skip_newlines()
         return_type = None
+        return_type_col = 0
+        return_type_line = 0
         if self.current().type == "OP" and self.current().value == "->":
             self.advance()
             self.skip_newlines()
             if self.current().type == "IDENT":
+                return_type_col = self.current().col
+                return_type_line = self.current().line
                 return_type = self.advance().value
         self.skip_newlines()
         body = self.parse_block()
-        return FnDecl(name=name, params=params, body=body, return_type=return_type, line=kw.line)
+        return FnDecl(name=name, params=params, body=body, return_type=return_type, line=kw.line, name_col=name_col, return_type_col=return_type_col, return_type_line=return_type_line)
 
     def parse_params(self):
         params = []
@@ -188,22 +199,30 @@ class Parser:
                     raise ParseError("Expected rest param name", self.current().line)
                 pname = self.advance().value
                 annot = None
+                annot_col = 0
+                annot_line = 0
                 if self.current().type == "OP" and self.current().value == ":":
                     self.advance()
                     if self.current().type == "IDENT":
+                        annot_col = self.current().col
+                        annot_line = self.current().line
                         annot = self.advance().value
-                params.append((pname, None, True, annot))
+                params.append((pname, None, True, annot, annot_col, annot_line))
             elif self.current().type == "IDENT":
                 pname = self.advance().value
                 annot = None
+                annot_col = 0
+                annot_line = 0
                 if self.current().type == "OP" and self.current().value == ":":
                     self.advance()
                     if self.current().type == "IDENT":
+                        annot_col = self.current().col
+                        annot_line = self.current().line
                         annot = self.advance().value
                 default = None
                 if self.match("OP", "="):
                     default = self.parse_expression()
-                params.append((pname, default, False, annot))
+                params.append((pname, default, False, annot, annot_col, annot_line))
             else:
                 raise ParseError("Expected parameter name", self.current().line)
             self.skip_newlines()
@@ -236,6 +255,7 @@ class Parser:
         kw = self.advance()  # class
         if self.current().type != "IDENT":
             raise ParseError("Expected class name", kw.line)
+        name_col = self.current().col
         name = self.advance().value
         superclass = None
         if self.current().type == "KEYWORD" and self.current().value == "extends":
@@ -255,7 +275,7 @@ class Parser:
             else:
                 # wrap? keep as method? ignore
                 pass
-        return ClassDecl(name=name, superclass=superclass, methods=methods, fields=fields, line=kw.line)
+        return ClassDecl(name=name, superclass=superclass, methods=methods, fields=fields, line=kw.line, name_col=name_col)
 
     def parse_if(self):
         kw = self.advance()
@@ -682,9 +702,9 @@ class Parser:
                 self.advance()
                 self.advance()  # =>
                 body = self.parse_expression()
-                return Lambda(params=[(tok.value, None, False, None)], body=body, line=tok.line)
+                return Lambda(params=[(tok.value, None, False, None, 0, 0)], body=body, line=tok.line)
             self.advance()
-            return Identifier(name=tok.value, line=tok.line)
+            return Identifier(name=tok.value, line=tok.line, col=tok.col)
         if tok.type == "KEYWORD" and tok.value == "this":
             self.advance()
             return Identifier(name="this", line=tok.line)
@@ -692,12 +712,13 @@ class Parser:
             self.advance()
             if self.current().type != "IDENT":
                 raise ParseError("Expected class name after new", tok.line)
+            cname_col = self.current().col
             cname = self.advance().value
             args = []
             if self.match("LPAREN", "("):
                 args, _ = self.parse_call_args()
                 self.expect("RPAREN", ")")
-            return NewExpr(class_name=cname, args=args, line=tok.line)
+            return NewExpr(class_name=cname, args=args, line=tok.line, class_name_col=cname_col)
         if tok.type == "KEYWORD" and tok.value == "fn":
             # function expression
             self.advance()
@@ -727,7 +748,7 @@ class Parser:
                             default = None
                             if self.match("OP", "="):
                                 default = self.parse_expression()
-                            params.append((pname, default, False, None))
+                            params.append((pname, default, False, None, 0, 0))
                             if self.current().type == "OP" and self.current().value == ",":
                                 self.advance()
                                 continue

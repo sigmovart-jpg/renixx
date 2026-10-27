@@ -149,6 +149,7 @@ class Formatter:
             default = p[1] if len(p) > 1 else None
             rest = p[2] if len(p) > 2 else False
             annot = p[3] if len(p) > 3 else None
+            # annot_col = p[4] if len(p) > 4 else 0  (not used in formatting)
             seg = name
             if annot:
                 seg += ": " + annot

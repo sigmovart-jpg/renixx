@@ -42,36 +42,24 @@ class SemanticAnalyzer:
         # hoisted names
         self.fn_names = set()
         self.class_names = set()
-        # occurrence tracking per (line, name) for accurate column reporting
-        self._occurrence_counts = {}
 
-    def _col_of(self, line_no, name, occurrence=None):
-        # line_no is 1-based
+
+    def _col_of(self, line_no, name):
+        # Fallback: find first word-boundary occurrence on the line.
+        # Prefer real positions (node.col / stmt.name_col) when available.
         if line_no < 1 or line_no > len(self.lines):
             return 0
         line_text = self.lines[line_no - 1]
-        # find all word-boundary occurrences of name on this line
-        positions = []
         idx = 0
         while True:
             j = line_text.find(name, idx)
             if j == -1:
-                break
+                return 0
             left_ok = (j == 0) or not (line_text[j-1].isalnum() or line_text[j-1] == "_")
             right_ok = (j + len(name) >= len(line_text)) or not (line_text[j+len(name)].isalnum() or line_text[j+len(name)] == "_")
             if left_ok and right_ok:
-                positions.append(j)
+                return j
             idx = j + 1
-        if not positions:
-            return 0
-        if occurrence is None:
-            key = (line_no, name)
-            occ = self._occurrence_counts.get(key, 0)
-            self._occurrence_counts[key] = occ + 1
-            occurrence = occ
-        if occurrence >= len(positions):
-            occurrence = len(positions) - 1
-        return positions[occurrence]
 
     def _add_diag(self, line, col, message, severity=1, end_col=None):
         if end_col is None:
@@ -113,21 +101,29 @@ class SemanticAnalyzer:
             self._analyze_stmts(s.statements, new_scope)
             return
         if isinstance(s, LetStmt):
-            if s.value is not None and s.name:
-                # pre-increment so self-references in value point to usage occurrence
-                key = (s.line, s.name)
-                self._occurrence_counts[key] = self._occurrence_counts.get(key, 0) + 1
             if s.value is not None:
                 self._analyze_expr(s.value, scope)
             if s.name:
+                name_col = getattr(s, "name_col", 0)
+                if name_col:
+                    name_col = max(0, name_col - 1)
+                else:
+                    name_col = self._col_of(s.line, s.name)
                 if s.name in scope.names:
-                    self._add_diag(s.line, self._col_of(s.line, s.name),
-                                   "Variable '%s' already defined in this scope" % s.name, 2)
+                    self._add_diag(s.line, name_col,
+                                   "Variable '%s' already defined in this scope" % s.name, 2,
+                                   name_col + len(s.name))
                 scope.define(s.name, "variable")
             if getattr(s, "type_annot", None):
+                ta_col = getattr(s, "type_annot_col", 0)
+                if ta_col:
+                    ta_col = max(0, ta_col - 1)
+                else:
+                    ta_col = self._col_of(s.line, s.type_annot)
                 if s.type_annot not in TYPE_NAMES:
-                    self._add_diag(s.line, self._col_of(s.line, s.type_annot),
-                                   "Unknown type '%s'" % s.type_annot, 2)
+                    self._add_diag(s.line, ta_col,
+                                   "Unknown type '%s'" % s.type_annot, 2,
+                                   ta_col + len(s.type_annot))
                 # static type check for literals
                 if s.value is not None and isinstance(s.value, Literal):
                     actual = None
@@ -143,9 +139,8 @@ class SemanticAnalyzer:
                     elif isinstance(v, str):
                         actual = "string"
                     if actual is not None and actual != s.type_annot:
-                        col = self._col_of(s.line, s.type_annot)
-                        self._add_diag(s.line, col, "Type error: expected %s, got %s" % (s.type_annot, actual), 1,
-                                       col + len(s.type_annot))
+                        self._add_diag(s.line, ta_col, "Type error: expected %s, got %s" % (s.type_annot, actual), 1,
+                                       ta_col + len(s.type_annot))
             return
         if isinstance(s, DestructureStmt):
             if s.value is not None:
@@ -162,12 +157,31 @@ class SemanticAnalyzer:
                 new_scope.define(pname, "parameter")
                 if len(p) > 3 and p[3]:
                     if p[3] not in TYPE_NAMES:
-                        self._add_diag(s.line, self._col_of(s.line, p[3]),
-                                       "Unknown type '%s'" % p[3], 2)
+                        annot_col = p[4] if len(p) > 4 else 0
+                        annot_line = p[5] if len(p) > 5 else 0
+                        if annot_col and annot_line:
+                            col = max(0, annot_col - 1)
+                            diag_line = annot_line
+                        elif annot_col:
+                            col = max(0, annot_col - 1)
+                            diag_line = s.line
+                        else:
+                            col = self._col_of(s.line, p[3])
+                            diag_line = s.line
+                        self._add_diag(diag_line, col, "Unknown type '%s'" % p[3], 2,
+                                       col + len(p[3]))
             if getattr(s, "return_type", None):
                 if s.return_type not in TYPE_NAMES:
-                    self._add_diag(s.line, self._col_of(s.line, s.return_type),
-                                   "Unknown type '%s'" % s.return_type, 2)
+                    rtc = getattr(s, "return_type_col", 0)
+                    rtl = getattr(s, "return_type_line", 0)
+                    if rtc:
+                        col = max(0, rtc - 1)
+                        diag_line = rtl if rtl else s.line
+                    else:
+                        col = self._col_of(s.line, s.return_type)
+                        diag_line = s.line
+                    self._add_diag(diag_line, col, "Unknown type '%s'" % s.return_type, 2,
+                                   col + len(s.return_type))
             self._analyze_stmts(s.body.statements if isinstance(s.body, Block) else [s.body], new_scope)
             return
         if isinstance(s, ClassDecl):
@@ -253,8 +267,11 @@ class SemanticAnalyzer:
             if e.name in KEYWORDS:
                 return
             if scope.lookup(e.name) is None and e.name not in self.fn_names and e.name not in self.class_names:
-                # property? no, bare identifier
-                col = self._col_of(e.line, e.name)
+                col = getattr(e, "col", 0)
+                if col:
+                    col = max(0, col - 1)
+                else:
+                    col = self._col_of(e.line, e.name)
                 self._add_diag(e.line, col, "Undefined variable '%s'" % e.name, 1,
                                col + len(e.name))
             return
@@ -339,8 +356,14 @@ class SemanticAnalyzer:
             return
         if isinstance(e, NewExpr):
             if e.class_name not in self.class_names and scope.lookup(e.class_name) is None:
-                col = self._col_of(e.line, e.class_name)
-                self._add_diag(e.line, col, "Unknown class '%s'" % e.class_name, 1,
+                col = getattr(e, "class_name_col", 0)
+                if col:
+                    col = max(0, col - 1)
+                    diag_line = e.line
+                else:
+                    col = self._col_of(e.line, e.class_name)
+                    diag_line = e.line
+                self._add_diag(diag_line, col, "Unknown class '%s'" % e.class_name, 1,
                                col + len(e.class_name))
             for a in e.args:
                 self._analyze_expr(a, scope)

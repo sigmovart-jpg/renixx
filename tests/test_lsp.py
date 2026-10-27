@@ -512,3 +512,194 @@ def test_diagnostics_type_error():
     assert notifs
     diags = notifs[-1]["params"]["diagnostics"]
     assert any("Type error" in d["message"] for d in diags)
+
+
+def test_diagnostic_column_accuracy():
+    # Regression test: two identical identifiers on one line should produce
+    # diagnostics at their respective columns, not both at the first occurrence.
+    code = "let y = x + x\n"
+    msgs, err = run_session([init_msg(), open_msg("file:///col.rn", code)])
+    notifs = [m for m in msgs if m.get("method") == "textDocument/publishDiagnostics"]
+    assert notifs
+    diags = notifs[-1]["params"]["diagnostics"]
+    assert len(diags) == 2, "expected 2 diagnostics, got %d" % len(diags)
+    cols = sorted(d["range"]["start"]["character"] for d in diags)
+    # "let y = x + x": first x at col 8, second x at col 12
+    assert cols == [8, 12], "expected columns [8, 12], got %r" % cols
+
+
+def test_diagnostic_column_string_not_matched():
+    # Regression: identifier inside string literal must not be selected.
+    code = 'let x = "x" + x\n'
+    msgs, err = run_session([init_msg(), open_msg("file:///colstr.rn", code)])
+    notifs = [m for m in msgs if m.get("method") == "textDocument/publishDiagnostics"]
+    assert notifs
+    diags = notifs[-1]["params"]["diagnostics"]
+    assert len(diags) == 1
+    assert diags[0]["range"]["start"]["character"] == 14
+
+
+def test_diagnostic_column_usage_not_declaration():
+    # Regression: diagnostic for undefined var must point to usage, not declaration.
+    code = "if (true) { let x; } print(x)\n"
+    msgs, err = run_session([init_msg(), open_msg("file:///coluse.rn", code)])
+    notifs = [m for m in msgs if m.get("method") == "textDocument/publishDiagnostics"]
+    assert notifs
+    diags = notifs[-1]["params"]["diagnostics"]
+    assert len(diags) == 1
+    assert diags[0]["range"]["start"]["character"] == 27
+
+
+def test_diagnostic_column_redeclaration():
+    # Regression: "already defined" must point to declaration name, not usage.
+    code = "let x = x; let x = x\n"
+    msgs, err = run_session([init_msg(), open_msg("file:///colredecl.rn", code)])
+    notifs = [m for m in msgs if m.get("method") == "textDocument/publishDiagnostics"]
+    assert notifs
+    diags = notifs[-1]["params"]["diagnostics"]
+    redecl = [d for d in diags if "already defined" in d["message"]]
+    assert redecl
+    assert redecl[0]["range"]["start"]["character"] == 15
+
+
+def test_diagnostic_column_interpolation():
+    # Regression: identifier inside string interpolation must get correct position.
+    code = 'let x = "prefix {missing}"\n'
+    msgs, err = run_session([init_msg(), open_msg("file:///colinterp.rn", code)])
+    notifs = [m for m in msgs if m.get("method") == "textDocument/publishDiagnostics"]
+    assert notifs
+    diags = notifs[-1]["params"]["diagnostics"]
+    assert len(diags) == 1
+    assert diags[0]["range"]["start"]["character"] == 17
+
+
+def test_diagnostic_column_const_type_error():
+    # Regression: const with type annotation error points to type name.
+    code = 'const x: int = "hi"\n'
+    msgs, err = run_session([init_msg(), open_msg("file:///colconst.rn", code)])
+    notifs = [m for m in msgs if m.get("method") == "textDocument/publishDiagnostics"]
+    assert notifs
+    diags = notifs[-1]["params"]["diagnostics"]
+    assert any("Type error" in d["message"] for d in diags)
+    te = [d for d in diags if "Type error" in d["message"]][0]
+    assert te["range"]["start"]["character"] == 9
+
+
+def test_diagnostic_column_const_redeclaration():
+    # Regression: const redeclaration points to second declaration name.
+    code = "const x = 1\nconst x = 2\n"
+    msgs, err = run_session([init_msg(), open_msg("file:///colconstre.rn", code)])
+    notifs = [m for m in msgs if m.get("method") == "textDocument/publishDiagnostics"]
+    assert notifs
+    diags = notifs[-1]["params"]["diagnostics"]
+    redecl = [d for d in diags if "already defined" in d["message"]]
+    assert redecl
+    assert redecl[0]["range"]["start"]["line"] == 1
+    assert redecl[0]["range"]["start"]["character"] == 6
+
+
+def _decode_semantic_tokens(data):
+    """Decode delta-encoded semantic tokens into list of (line, col, length)."""
+    result = []
+    line = 0
+    col = 0
+    i = 0
+    while i < len(data):
+        dl, dc, length, ttype, mods = data[i:i+5]
+        line += dl
+        col = col + dc if dl == 0 else dc
+        result.append((line, col, length, ttype))
+        i += 5
+    return result
+
+
+def test_semantic_tokens_no_double_utf16():
+    # Regression: semantic token for x after emoji should be at UTF-16 col 18, not 19.
+    code = 'let s = "😀"; let x = 1\n'
+    msgs, err = run_session([
+        init_msg(),
+        open_msg("file:///semutf.rn", code),
+        {"jsonrpc": "2.0", "id": 2, "method": "textDocument/semanticTokens/full",
+         "params": {"textDocument": {"uri": "file:///semutf.rn"}}},
+    ])
+    m = find(msgs, id=2)
+    assert m is not None and m.get("result") is not None
+    decoded = _decode_semantic_tokens(m["result"]["data"])
+    # find token with length 1 at col 18 (the 'x')
+    x_tokens = [t for t in decoded if t[2] == 1 and t[1] == 18]
+    assert x_tokens, "expected semantic token for x at UTF-16 col 18, got %r" % decoded
+
+
+def test_rename_after_emoji():
+    # Regression: rename at UTF-16 position after two emoji should find x.
+    code = 'let s = "😀😀"; let x = 1\n'
+    msgs, err = run_session([
+        init_msg(),
+        open_msg("file:///renemoji.rn", code),
+        {"jsonrpc": "2.0", "id": 2, "method": "textDocument/rename",
+         "params": {"textDocument": {"uri": "file:///renemoji.rn"}, "position": {"line": 0, "character": 20},
+                    "newName": "y"}},
+    ])
+    m = find(msgs, id=2)
+    assert m is not None and m.get("result") is not None
+    changes = m["result"]["changes"]
+    assert "file:///renemoji.rn" in changes
+    edits = changes["file:///renemoji.rn"]
+    assert len(edits) >= 1
+    assert edits[0]["range"]["start"]["character"] == 20
+
+
+def test_diagnostic_multiline_param_type():
+    # Regression: unknown type in multi-line param must report correct line and col.
+    code = "fn f(\n  x: Wrong\n) {}\n"
+    msgs, err = run_session([init_msg(), open_msg("file:///mlparam.rn", code)])
+    notifs = [m for m in msgs if m.get("method") == "textDocument/publishDiagnostics"]
+    assert notifs
+    diags = notifs[-1]["params"]["diagnostics"]
+    ut = [d for d in diags if "Unknown type" in d["message"]]
+    assert ut, "expected Unknown type diagnostic"
+    assert ut[0]["range"]["start"]["line"] == 1
+    assert ut[0]["range"]["start"]["character"] == 5
+
+
+def test_diagnostic_multiline_return_type():
+    # Regression: unknown return type on second line must report correct line and col.
+    code = "fn f() ->\n  Wrong {}\n"
+    msgs, err = run_session([init_msg(), open_msg("file:///mlret.rn", code)])
+    notifs = [m for m in msgs if m.get("method") == "textDocument/publishDiagnostics"]
+    assert notifs
+    diags = notifs[-1]["params"]["diagnostics"]
+    ut = [d for d in diags if "Unknown type" in d["message"]]
+    assert ut, "expected Unknown type diagnostic"
+    assert ut[0]["range"]["start"]["line"] == 1
+    assert ut[0]["range"]["start"]["character"] == 2
+
+
+def test_definition_not_in_string():
+    # Regression: find_definitions must not pick identifier inside string.
+    code = 'let s = "f"; fn f(a) {}\n'
+    msgs, err = run_session([
+        init_msg(),
+        open_msg("file:///defstr.rn", code),
+        {"jsonrpc": "2.0", "id": 2, "method": "textDocument/definition",
+         "params": {"textDocument": {"uri": "file:///defstr.rn"}, "position": {"line": 0, "character": 16}}},
+    ])
+    m = find(msgs, id=2)
+    assert m is not None and m.get("result") is not None
+    # f function should be at col 16, not col 9 (inside string)
+    assert m["result"]["range"]["start"]["character"] == 16
+
+
+def test_class_definition_not_in_string():
+    # Regression: class definition must not pick name inside string.
+    code = 'let s = "Foo"; class Foo {}\n'
+    msgs, err = run_session([
+        init_msg(),
+        open_msg("file:///defcls.rn", code),
+        {"jsonrpc": "2.0", "id": 2, "method": "textDocument/definition",
+         "params": {"textDocument": {"uri": "file:///defcls.rn"}, "position": {"line": 0, "character": 22}}},
+    ])
+    m = find(msgs, id=2)
+    assert m is not None and m.get("result") is not None
+    # Foo class should be at col 21, not col 9 (inside string)
+    assert m["result"]["range"]["start"]["character"] == 21

@@ -80,6 +80,7 @@ class Lexer:
             break
 
     def read_string(self, quote):
+        start_col = self.col
         triple = self.source.startswith(quote + quote + quote, self.pos)
         if triple:
             self.advance()
@@ -92,7 +93,7 @@ class Lexer:
                     self.advance()
                     self.advance()
                     self.advance()
-                    return Token("STRING", "".join(buf), start_line, 0)
+                    return Token("STRING", "".join(buf), start_line, start_col)
                 ch = self.source[self.pos]
                 if ch == "\\":
                     self.advance()
@@ -104,9 +105,10 @@ class Lexer:
                     if ch == "\n":
                         self.line += 1
                         self.col = 1
+                    else:
+                        self.col += 1
                     buf.append(ch)
                     self.pos += 1
-                    self.col += 1
             self.error("Unterminated string")
         # single-quoted or double-quoted
         self.advance()  # opening quote
@@ -156,6 +158,8 @@ class Lexer:
                     if depth != 0:
                         self.error("Unterminated interpolation")
                     inner_src = self.source[self.pos+1:i]
+                    base_line = self.line
+                    base_col = self.col
                     # advance pos past the braces
                     # update line/col by consuming
                     for cc in self.source[self.pos:i+1]:
@@ -168,21 +172,25 @@ class Lexer:
                     inner_tokens = tokenize(inner_src)
                     while inner_tokens and inner_tokens[-1].type in ("NEWLINE", "EOF"):
                         inner_tokens.pop()
+                    # offset inner token positions to original source
+                    for tok in inner_tokens:
+                        tok.line += base_line - 1
+                        if tok.line == base_line:
+                            tok.col += base_col
                     parts.append(("expr", inner_tokens))
                     continue
                 buf.append(ch)
                 self.advance()
-                self.col += 1
             if self.pos >= len(self.source) or self.source[self.pos] != quote:
                 self.error("Unterminated string")
             self.advance()  # closing quote
             if buf:
                 parts.append(("text", "".join(buf)))
             if any(p[0] == "expr" for p in parts):
-                return Token("FSTRING", parts, start_line, 0)
+                return Token("FSTRING", parts, start_line, start_col)
             # collapse to plain string
             text = "".join(p[1] for p in parts)
-            return Token("STRING", text, start_line, 0)
+            return Token("STRING", text, start_line, start_col)
         # single-quoted: plain
         buf = []
         while self.pos < len(self.source) and self.source[self.pos] != quote and self.source[self.pos] != "\n":
@@ -196,14 +204,14 @@ class Lexer:
             else:
                 buf.append(ch)
                 self.advance()
-                self.col += 1
         if self.pos >= len(self.source) or self.source[self.pos] != quote:
             self.error("Unterminated string")
         self.advance()  # closing quote
-        return Token("STRING", "".join(buf), start_line, 0)
+        return Token("STRING", "".join(buf), start_line, start_col)
 
 
     def read_number(self):
+        start_col = self.col
         start = self.pos
         start_line = self.line
         if self.source[self.pos] == "0" and self.pos + 1 < len(self.source) and self.source[self.pos + 1].lower() == "x":
@@ -216,7 +224,7 @@ class Lexer:
                 val = int(raw, 16)
             except ValueError:
                 self.error("Invalid hex number")
-            return Token("NUMBER", val, start_line, 0)
+            return Token("NUMBER", val, start_line, start_col)
         if self.source[self.pos] == "0" and self.pos + 1 < len(self.source) and self.source[self.pos + 1].lower() == "b":
             self.advance()
             self.advance()
@@ -227,7 +235,7 @@ class Lexer:
                 val = int(raw, 2)
             except ValueError:
                 self.error("Invalid binary number")
-            return Token("NUMBER", val, start_line, 0)
+            return Token("NUMBER", val, start_line, start_col)
         has_dot = False
         has_exp = False
         while self.pos < len(self.source):
@@ -252,29 +260,32 @@ class Lexer:
                 val = int(raw)
         except ValueError:
             self.error("Invalid number")
-        return Token("NUMBER", val, start_line, 0)
+        return Token("NUMBER", val, start_line, start_col)
 
     def read_ident(self):
+        start_col = self.col
         start = self.pos
         start_line = self.line
         while self.pos < len(self.source) and (self.source[self.pos].isalnum() or self.source[self.pos] == "_"):
             self.advance()
         word = self.source[start:self.pos]
         if word in KEYWORDS:
-            return Token("KEYWORD", word, start_line, 0)
-        return Token("IDENT", word, start_line, 0)
+            return Token("KEYWORD", word, start_line, start_col)
+        return Token("IDENT", word, start_line, start_col)
 
     def tokenize(self):
         while True:
             self.skip_whitespace_and_comments()
+            col = self.col
             if self.pos >= len(self.source):
                 if self.tokens and self.tokens[-1].type != "NEWLINE":
-                    self.tokens.append(Token("NEWLINE", "\n", self.line, 0))
-                self.tokens.append(Token("EOF", None, self.line, 0))
+                    self.tokens.append(Token("NEWLINE", "\n", self.line, col))
+                self.tokens.append(Token("EOF", None, self.line, col))
                 break
 
             ch = self.source[self.pos]
             line = self.line
+            col = self.col
 
             # backslash line continuation
             if ch == "\\" and self.pos + 1 < len(self.source) and self.source[self.pos + 1] == "\n":
@@ -287,7 +298,7 @@ class Lexer:
                 self.advance()
                 if self.bracket_depth == 0:
                     if not self.tokens or self.tokens[-1].type != "NEWLINE":
-                        self.tokens.append(Token("NEWLINE", "\n", line, 0))
+                        self.tokens.append(Token("NEWLINE", "\n", line, col))
                 continue
 
             # strings
@@ -312,13 +323,13 @@ class Lexer:
             three = self.source[self.pos:self.pos + 3]
             two = self.source[self.pos:self.pos + 2]
             if three in THREE_CHAR:
-                self.tokens.append(Token("OP", three, line, 0))
+                self.tokens.append(Token("OP", three, line, col))
                 self.advance()
                 self.advance()
                 self.advance()
                 continue
             if two in TWO_CHAR:
-                self.tokens.append(Token("OP", two, line, 0))
+                self.tokens.append(Token("OP", two, line, col))
                 self.advance()
                 self.advance()
                 continue
@@ -326,18 +337,18 @@ class Lexer:
             if ch in "([{":
                 self.bracket_depth += 1
                 t = "LPAREN" if ch == "(" else ("LBRACKET" if ch == "[" else "LBRACE")
-                self.tokens.append(Token(t, ch, line, 0))
+                self.tokens.append(Token(t, ch, line, col))
                 self.advance()
                 continue
             if ch in ")]}":
                 self.bracket_depth = max(0, self.bracket_depth - 1)
                 t = "RPAREN" if ch == ")" else ("RBRACKET" if ch == "]" else "RBRACE")
-                self.tokens.append(Token(t, ch, line, 0))
+                self.tokens.append(Token(t, ch, line, col))
                 self.advance()
                 continue
 
             if ch in "+-*/%<>=!&|^~?:,;.":
-                self.tokens.append(Token("OP", ch, line, 0))
+                self.tokens.append(Token("OP", ch, line, col))
                 self.advance()
                 continue
 

@@ -121,6 +121,7 @@ class Lambda(Expr):
 class NewExpr(Expr):
     class_name: str = ""
     args: List[Expr] = field(default_factory=list)
+    class_name_col: int = 0
 
 
 @dataclass
@@ -165,6 +166,8 @@ class LetStmt(Stmt):
     value: Optional[Expr] = None
     mutable: bool = True  # let vs const
     type_annot: Optional[str] = None
+    name_col: int = 0
+    type_annot_col: int = 0
 
 @dataclass
 class DestructureStmt(Stmt):
@@ -172,6 +175,7 @@ class DestructureStmt(Stmt):
     names: List[str] = field(default_factory=list)
     value: Optional[Expr] = None
     mutable: bool = True
+    name_col: int = 0
 
 
 @dataclass
@@ -186,12 +190,16 @@ class FnDecl(Stmt):
     body: Block = None
     decorators: List[str] = field(default_factory=list)
     return_type: Optional[str] = None
+    name_col: int = 0
+    return_type_col: int = 0
+    return_type_line: int = 0
 
 
 @dataclass
 class ClassDecl(Stmt):
     name: str = ""
     superclass: Optional[str] = None
+    name_col: int = 0
     methods: List[FnDecl] = field(default_factory=list)
     fields: List[LetStmt] = field(default_factory=list)
 

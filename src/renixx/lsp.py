@@ -32,6 +32,22 @@ def write_message(msg):
     sys.stdout.write("Content-Length: %d\r\n\r\n%s" % (len(body.encode("utf-8")), body))
     sys.stdout.flush()
 
+
+# ---- UTF-16 <-> code point conversion (LSP uses UTF-16 code units) ----
+def py_col_to_utf16(line_text, py_col):
+    """Convert a Python code-point column to a UTF-16 code-unit column."""
+    return len(line_text[:py_col].encode("utf-16-le")) // 2
+
+def utf16_col_to_py(line_text, utf16_col):
+    """Convert a UTF-16 code-unit column to a Python code-point column."""
+    units = 0
+    for i, ch in enumerate(line_text):
+        if units >= utf16_col:
+            return i
+        units += 2 if ord(ch) > 0xFFFF else 1
+    return len(line_text)
+
+
 # ---- document store ----
 documents = {}  # uri -> text
 asts = {}       # uri -> program or None
@@ -66,10 +82,15 @@ def analyze(uri, text):
     # semantic analysis
     sem_diags, _ = semantic_analyze(text)
     lsp_diags = []
+    lines = text.splitlines()
     for d in sem_diags:
         line = max(0, d["line"] - 1)
         col = max(0, d["col"])
         end_col = d.get("end_col", col + 1)
+        # convert Python code-point columns to UTF-16 code units
+        if line < len(lines):
+            col = py_col_to_utf16(lines[line], col)
+            end_col = py_col_to_utf16(lines[line], end_col)
         lsp_diags.append({
             "range": {"start": {"line": line, "character": col},
                       "end": {"line": line, "character": end_col}},
@@ -91,6 +112,9 @@ def _publish_syntax_error(uri, text, e):
     end_col = col
     if line < len(lines):
         end_col = len(lines[line])
+        # convert to UTF-16
+        col = py_col_to_utf16(lines[line], col)
+        end_col = py_col_to_utf16(lines[line], end_col)
     diags = [{
         "range": {"start": {"line": line, "character": col},
                   "end": {"line": line, "character": end_col}},
@@ -123,16 +147,36 @@ def find_definitions(program, text=None):
         return idx if idx >= 0 else 0
     for stmt in program.statements:
         if isinstance(stmt, FnDecl) and stmt.name:
-            defs.append((stmt.name, "function", stmt.line - 1, col_of(stmt.line, stmt.name)))
+            c = getattr(stmt, "name_col", 0)
+            if c:
+                c = max(0, c - 1)
+            else:
+                c = col_of(stmt.line, stmt.name)
+            defs.append((stmt.name, "function", stmt.line - 1, c))
         if isinstance(stmt, ClassDecl):
-            defs.append((stmt.name, "class", stmt.line - 1, col_of(stmt.line, stmt.name)))
+            c = getattr(stmt, "name_col", 0)
+            if c:
+                c = max(0, c - 1)
+            else:
+                c = col_of(stmt.line, stmt.name)
+            defs.append((stmt.name, "class", stmt.line - 1, c))
         if isinstance(stmt, LetStmt) and stmt.name:
-            defs.append((stmt.name, "variable", stmt.line - 1, col_of(stmt.line, stmt.name)))
+            c = getattr(stmt, "name_col", 0)
+            if c:
+                c = max(0, c - 1)
+            else:
+                c = col_of(stmt.line, stmt.name)
+            defs.append((stmt.name, "variable", stmt.line - 1, c))
     for stmt in program.statements:
         if isinstance(stmt, ClassDecl):
             for m in stmt.methods:
                 if m.name:
-                    defs.append((m.name, "method", m.line - 1, col_of(m.line, m.name)))
+                    c = getattr(m, "name_col", 0)
+                    if c:
+                        c = max(0, c - 1)
+                    else:
+                        c = col_of(m.line, m.name)
+                    defs.append((m.name, "method", m.line - 1, c))
     # also FnDecl with type annotations etc. already covered
     # DestructureStmt
     for stmt in program.statements:
@@ -222,6 +266,7 @@ def handle_signature_help(params):
     for i in range(line):
         prefix += lines[i] + "\n"
     if line < len(lines):
+        ch = utf16_col_to_py(lines[line], ch)
         prefix += lines[line][:ch]
     # find last '(' not closed
     depth = 0
@@ -356,15 +401,24 @@ def handle_references(params):
     uri = params["textDocument"]["uri"]
     pos = params["position"]
     text = documents.get(uri, "")
-    word = _word_at(text, pos["line"], pos["character"])
+    lines = text.splitlines()
+    line = pos["line"]
+    ch = pos["character"]
+    if line < len(lines):
+        ch = utf16_col_to_py(lines[line], ch)
+    word = _word_at(text, line, ch)
     if not word:
         return []
     result = []
     for u, t in documents.items():
         # only search the same identifier name
         for (ln, col) in _identifier_positions(t, word):
-            result.append({"uri": u, "range": {"start": {"line": ln, "character": col},
-                                              "end": {"line": ln, "character": col + len(word)}}})
+            lines = t.splitlines()
+            line_text = lines[ln] if ln < len(lines) else ""
+            utf16_col = py_col_to_utf16(line_text, col)
+            utf16_end = py_col_to_utf16(line_text, col + len(word))
+            result.append({"uri": u, "range": {"start": {"line": ln, "character": utf16_col},
+                                              "end": {"line": ln, "character": utf16_end}}})
     return result
 
 def handle_rename(params):
@@ -372,7 +426,12 @@ def handle_rename(params):
     pos = params["position"]
     new_name = params["newName"]
     text = documents.get(uri, "")
-    word = _word_at(text, pos["line"], pos["character"])
+    lines = text.splitlines()
+    line = pos["line"]
+    ch = pos["character"]
+    if line < len(lines):
+        ch = utf16_col_to_py(lines[line], ch)
+    word = _word_at(text, line, ch)
     if not word or not word.isidentifier():
         return None
     refs = handle_references({"textDocument": {"uri": uri}, "position": pos})
@@ -403,11 +462,15 @@ def handle_workspace_symbol(params):
         for name, kind, dline, dcol in defs:
             if query.lower() in name.lower():
                 sk = 12 if kind == "function" else (5 if kind == "class" else 13)
+                lines = (documents.get(uri, "") or "").splitlines()
+                line_text = lines[dline] if dline < len(lines) else ""
+                uc = py_col_to_utf16(line_text, dcol)
+                ue = py_col_to_utf16(line_text, dcol + len(name))
                 result.append({
                     "name": name,
                     "kind": sk,
-                    "location": {"uri": uri, "range": {"start": {"line": dline, "character": dcol},
-                                                       "end": {"line": dline, "character": dcol + len(name)}}},
+                    "location": {"uri": uri, "range": {"start": {"line": dline, "character": uc},
+                                                       "end": {"line": dline, "character": ue}}},
                 })
     return result
 
@@ -444,19 +507,25 @@ def handle_semantic_tokens(params):
     defs = find_definitions(program, text)
     for name, kind, dline, dcol in defs:
         ttype = "function" if kind in ("function","method") else ("class" if kind == "class" else "variable")
+        # keep Python (code-point) positions; conversion to UTF-16 happens in encoding loop
         tokens.append((dline, dcol, len(name), ttype))
     # sort by line, col
     tokens.sort(key=lambda t: (t[0], t[1]))
-    # encode delta
+    # convert columns to UTF-16 and encode delta
     prev_line = 0
     prev_col = 0
     out = []
     for line, col, length, ttype in tokens:
+        line_text = lines[line] if line < len(lines) else ""
+        utf16_col = py_col_to_utf16(line_text, col)
+        utf16_len = py_col_to_utf16(line_text[col:col+length], 0) + (py_col_to_utf16(line_text[col:col+length], length) if length <= len(line_text) - col else length)
+        # simpler: length in UTF-16
+        utf16_len = len(line_text[col:col+length].encode("utf-16-le")) // 2
         delta_line = line - prev_line
-        delta_col = col if delta_line > 0 else col - prev_col
-        out.extend([delta_line, delta_col, length, TOKEN_TYPES.get(ttype, 2), 0])
+        delta_col = utf16_col if delta_line > 0 else utf16_col - prev_col
+        out.extend([delta_line, delta_col, utf16_len, TOKEN_TYPES.get(ttype, 2), 0])
         prev_line = line
-        prev_col = col
+        prev_col = utf16_col
     return {"data": out}
 
 def handle_hover(params):
@@ -469,6 +538,7 @@ def handle_hover(params):
     word = ""
     if line < len(lines):
         s = lines[line]
+        ch = utf16_col_to_py(s, ch)
         if ch > len(s):
             ch = len(s)
         start = ch
@@ -503,6 +573,7 @@ def handle_definition(params):
     word = ""
     if line < len(lines):
         s = lines[line]
+        ch = utf16_col_to_py(s, ch)
         if ch > len(s):
             ch = len(s)
         start = ch
@@ -519,8 +590,12 @@ def handle_definition(params):
     defs = find_definitions(program, text)
     for name, kind, dline, dcol in defs:
         if name == word:
-            return {"uri": uri, "range": {"start": {"line": dline, "character": dcol},
-                                          "end": {"line": dline, "character": dcol + len(name)}}}
+            lines = text.splitlines()
+            line_text = lines[dline] if dline < len(lines) else ""
+            utf16_col = py_col_to_utf16(line_text, dcol)
+            utf16_end = py_col_to_utf16(line_text, dcol + len(name))
+            return {"uri": uri, "range": {"start": {"line": dline, "character": utf16_col},
+                                          "end": {"line": dline, "character": utf16_end}}}
     return None
 
 def handle_document_symbol(params):
@@ -530,13 +605,17 @@ def handle_document_symbol(params):
     out = []
     for name, kind, dline, dcol in defs:
         sk = 12 if kind == "function" else (5 if kind == "class" else 13)
+        lines = documents.get(uri, "").splitlines()
+        line_text = lines[dline] if dline < len(lines) else ""
+        uc = py_col_to_utf16(line_text, dcol)
+        ue = py_col_to_utf16(line_text, dcol + len(name))
         out.append({
             "name": name,
             "kind": sk,
-            "range": {"start": {"line": dline, "character": dcol},
-                      "end": {"line": dline, "character": dcol + len(name)}},
-            "selectionRange": {"start": {"line": dline, "character": dcol},
-                               "end": {"line": dline, "character": dcol + len(name)}},
+            "range": {"start": {"line": dline, "character": uc},
+                      "end": {"line": dline, "character": ue}},
+            "selectionRange": {"start": {"line": dline, "character": uc},
+                               "end": {"line": dline, "character": ue}},
         })
     return out
 
@@ -551,7 +630,8 @@ def handle_formatting(params):
     # return full-document replace
     lines = text.splitlines()
     last_line = len(lines) - 1 if lines else 0
-    last_char = len(lines[last_line]) if lines else 0
+    last_char_py = len(lines[last_line]) if lines else 0
+    last_char = py_col_to_utf16(lines[last_line], last_char_py) if lines else 0
     return [{
         "range": {"start": {"line": 0, "character": 0},
                   "end": {"line": last_line, "character": last_char}},
@@ -590,10 +670,19 @@ def main():
                     # incremental
                     rng = ch["range"]
                     start_line = rng["start"]["line"]
-                    start_col = rng["start"]["character"]
+                    start_col_utf16 = rng["start"]["character"]
                     end_line = rng["end"]["line"]
-                    end_col = rng["end"]["character"]
+                    end_col_utf16 = rng["end"]["character"]
                     lines = text.split("\n")
+                    # convert UTF-16 columns to Python code-point columns
+                    if start_line < len(lines):
+                        start_col = utf16_col_to_py(lines[start_line], start_col_utf16)
+                    else:
+                        start_col = start_col_utf16
+                    if end_line < len(lines):
+                        end_col = utf16_col_to_py(lines[end_line], end_col_utf16)
+                    else:
+                        end_col = end_col_utf16
                     # convert to flat index
                     def to_offset(l, c):
                         off = 0
