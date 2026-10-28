@@ -190,7 +190,7 @@ def test_caught_exception_runs_finally_and_preserves_output_order():
     )
     assert run_program(source) == [
         "before",
-        "RuntimeError: boom",
+        "boom",
         "cleanup",
     ]
 

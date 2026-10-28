@@ -36,6 +36,18 @@ class RuntimeError(RenixxError):
         self.stack = stack
 
 
+class ThrowSignal(Exception):
+    """A thrown value in flight; `catch` receives `.value` unchanged."""
+    def __init__(self, value, line=0, col=0, stack=None):
+        super().__init__(value)
+        self.value = value
+        self.line = line
+        self.col = col
+        if stack is None:
+            stack = list(_CURRENT_STACK)
+        self.stack = stack
+
+
 class ReturnValue(Exception):
     """Control-flow exception for return statements."""
     def __init__(self, value):

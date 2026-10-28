@@ -6,7 +6,10 @@ import math
 import random
 import json as _json
 from .ast import *
-from .errors import RuntimeError as RTError, ReturnValue, BreakSignal, ContinueSignal
+from .errors import (
+    RenixxError, RuntimeError as RTError, ReturnValue, BreakSignal,
+    ContinueSignal, ThrowSignal,
+)
 from .environment import Environment
 
 class RenixxFunction:
@@ -183,6 +186,27 @@ class Interpreter:
         if isinstance(x, RenixxInstance):
             return "<%s instance>" % x.cls.name
         return str(x)
+
+    def _pos(self, node):
+        """Best-effort (line, col) for a node, looking into children for a column."""
+        line = getattr(node, "line", 0) or 0
+        col = getattr(node, "col", 0) or 0
+        if col:
+            return line, col
+        for attr in ("callee", "left", "obj", "value", "target", "index", "operand"):
+            child = getattr(node, attr, None)
+            if isinstance(child, Node):
+                child_line, child_col = self._pos(child)
+                if child_col:
+                    return line or child_line, child_col
+        return line, col
+
+    def _bad_operands(self, op, l, r, line, col):
+        return RTError(
+            "Unsupported operand types for %s: %s and %s"
+            % (op, type(l).__name__, type(r).__name__),
+            line, col,
+        )
 
     def _int(self, x):
         if isinstance(x, bool):
@@ -580,16 +604,22 @@ class Interpreter:
                 # Control-flow signals are not errors: let them reach the
                 # enclosing function/loop instead of swallowing them here.
                 raise
-            except Exception as e:
-                if stmt.catch_block is not None:
-                    new_env = Environment(env)
-                    if stmt.catch_var:
-                        new_env.define(stmt.catch_var, str(e) if not isinstance(e, RTError) else e.message, mutable=True)
-                        # store error object
-                        new_env.set(stmt.catch_var, e if isinstance(e, Exception) else RTError(str(e)))
-                    self.exec_stmt(stmt.catch_block, new_env)
-                else:
+            except ThrowSignal as thrown:
+                if stmt.catch_block is None:
                     raise
+                new_env = Environment(env)
+                if stmt.catch_var:
+                    # `catch e` receives exactly the thrown value.
+                    new_env.define(stmt.catch_var, thrown.value, mutable=True)
+                self.exec_stmt(stmt.catch_block, new_env)
+            except RenixxError as error:
+                if stmt.catch_block is None:
+                    raise
+                new_env = Environment(env)
+                if stmt.catch_var:
+                    # Runtime errors are caught as their message string.
+                    new_env.define(stmt.catch_var, error.message, mutable=True)
+                self.exec_stmt(stmt.catch_block, new_env)
             finally:
                 if stmt.finally_block is not None:
                     self.exec_stmt(stmt.finally_block, env)
@@ -603,7 +633,8 @@ class Interpreter:
             raise signal
         if isinstance(stmt, ThrowStmt):
             v = self.eval_expr(stmt.value, env)
-            raise RTError(self.to_string(v))
+            line, col = self._pos(stmt)
+            raise ThrowSignal(v, line, col)
         if isinstance(stmt, BreakStmt):
             signal = BreakSignal()
             signal.line = stmt.line
@@ -675,14 +706,26 @@ class Interpreter:
             raise RTError("Undefined variable '%s'" % name, expr.line)
         if isinstance(expr, UnaryOp):
             v = self.eval_expr(expr.operand, env)
-            if expr.op in ("-",):
-                return -v
-            if expr.op in ("+",):
-                return +v
+            line, col = self._pos(expr)
+            if expr.op in ("-", "+"):
+                try:
+                    return -v if expr.op == "-" else +v
+                except TypeError:
+                    raise RTError(
+                        "Unsupported operand type for %s: %s"
+                        % (expr.op, type(v).__name__),
+                        line, col,
+                    )
             if expr.op in ("!", "not"):
                 return not self._truthy(v)
             if expr.op == "~":
-                return ~int(v)
+                try:
+                    return ~int(v)
+                except (TypeError, ValueError):
+                    raise RTError(
+                        "Unsupported operand type for ~: %s" % type(v).__name__,
+                        line, col,
+                    )
             raise RTError("Unknown unary op %s" % expr.op, expr.line)
         if isinstance(expr, BinaryOp):
             # short-circuit for and/or
@@ -699,24 +742,49 @@ class Interpreter:
             l = self.eval_expr(expr.left, env)
             r = self.eval_expr(expr.right, env)
             op = expr.op
+            line, col = self._pos(expr)
             if op == "+":
                 if isinstance(l, str) or isinstance(r, str):
                     return self.to_string(l) + self.to_string(r)
-                return l + r
+                try:
+                    return l + r
+                except TypeError:
+                    raise self._bad_operands(op, l, r, line, col)
             if op == "-":
-                return l - r
+                try:
+                    return l - r
+                except TypeError:
+                    raise self._bad_operands(op, l, r, line, col)
             if op == "*":
                 if isinstance(l, str) and isinstance(r, int):
                     return l * r
                 if isinstance(r, str) and isinstance(l, int):
                     return r * l
-                return l * r
+                try:
+                    return l * r
+                except TypeError:
+                    raise self._bad_operands(op, l, r, line, col)
             if op == "/":
-                return l / r
+                try:
+                    return l / r
+                except ZeroDivisionError:
+                    raise RTError("Division by zero", line, col)
+                except TypeError:
+                    raise self._bad_operands(op, l, r, line, col)
             if op == "%":
-                return l % r
+                try:
+                    return l % r
+                except ZeroDivisionError:
+                    raise RTError("Modulo by zero", line, col)
+                except TypeError:
+                    raise self._bad_operands(op, l, r, line, col)
             if op == "**":
-                return l ** r
+                try:
+                    return l ** r
+                except ZeroDivisionError:
+                    raise RTError("Division by zero", line, col)
+                except TypeError:
+                    raise self._bad_operands(op, l, r, line, col)
             if op == "==":
                 return l == r
             if op == "!=":
@@ -726,37 +794,52 @@ class Interpreter:
             if op == "!==":
                 return not (l is r and type(l) is type(r))
             if op in ("<", ">", "<=", ">="):
-                return self._compare(l, r, op)
+                return self._compare(l, r, op, line, col)
             if op == "is":
                 return l is r
             if op == "in":
                 if isinstance(r, (list, tuple, str, dict)):
-                    if isinstance(r, dict):
+                    try:
                         return l in r
-                    return l in r
-                raise RTError("'in' not supported", expr.line)
-            raise RTError("Unknown binary op %s" % op, expr.line)
+                    except TypeError:
+                        raise RTError(
+                            "Unhashable key type: %s" % type(l).__name__,
+                            line, col,
+                        )
+                raise RTError("'in' not supported", line, col)
+            raise RTError("Unknown binary op %s" % op, line, col)
         if isinstance(expr, Assign):
             val = self.eval_expr(expr.value, env)
             target = expr.target
+            line, col = self._pos(target)
             if expr.op != "=":
                 cur = self.eval_expr(target, env)
                 op = expr.op[:-1]
-                if op == "+": val = cur + val
-                elif op == "-": val = cur - val
-                elif op == "*": val = cur * val
-                elif op == "/": val = cur / val
-                elif op == "%": val = cur % val
+                try:
+                    if op == "+": val = cur + val
+                    elif op == "-": val = cur - val
+                    elif op == "*": val = cur * val
+                    elif op == "/": val = cur / val
+                    elif op == "%": val = cur % val
+                except ZeroDivisionError:
+                    raise RTError("Division by zero", line, col)
+                except TypeError:
+                    raise self._bad_operands(op, cur, val, line, col)
             if isinstance(target, Identifier):
                 if target.name == "this":
                     # find instance env? handle below via 'this' binding
                     pass
-                env.set(target.name, val)
+                env.set(target.name, val, target.line, target.col)
                 return val
             if isinstance(target, Index):
                 obj = self.eval_expr(target.obj, env)
                 idx = self.eval_expr(target.index, env)
-                obj[idx] = val
+                try:
+                    obj[idx] = val
+                except IndexError:
+                    raise RTError("Index out of range: %r" % (idx,), line, col)
+                except TypeError as error:
+                    raise RTError("Cannot assign by index: %s" % error, line, col)
                 return val
             if isinstance(target, Member):
                 obj = self.eval_expr(target.obj, env)
@@ -774,27 +857,50 @@ class Interpreter:
             kwargs = {}
             for name, e in expr.kwargs:
                 kwargs[name] = self.eval_expr(e, env)
-            return self.call_callable(callee, args, kwargs, expr.line)
+            line, col = self._pos(expr)
+            return self.call_callable(callee, args, kwargs, line, col)
         if isinstance(expr, Index):
             obj = self.eval_expr(expr.obj, env)
             idx = self.eval_expr(expr.index, env)
+            line, col = self._pos(expr)
             if isinstance(obj, dict):
-                if idx not in obj:
-                    raise RTError("KeyError: %r" % idx, expr.line)
-                return obj[idx]
+                try:
+                    if idx not in obj:
+                        raise RTError("KeyError: %r" % idx, line, col)
+                    return obj[idx]
+                except TypeError:
+                    raise RTError(
+                        "Unhashable key type: %s" % type(idx).__name__,
+                        line, col,
+                    )
             if isinstance(obj, (list, tuple, str)):
-                return obj[idx]
-            raise RTError("Cannot index %s" % type(obj).__name__, expr.line)
+                try:
+                    return obj[idx]
+                except IndexError:
+                    raise RTError("Index out of range: %r" % (idx,), line, col)
+                except TypeError:
+                    raise RTError(
+                        "Invalid index type: %s" % type(idx).__name__,
+                        line, col,
+                    )
+            raise RTError("Cannot index %s" % type(obj).__name__, line, col)
         if isinstance(expr, Slice):
             obj = self.eval_expr(expr.obj, env)
             start = self.eval_expr(expr.start, env) if expr.start is not None else None
             stop = self.eval_expr(expr.stop, env) if expr.stop is not None else None
             step = self.eval_expr(expr.step, env) if expr.step is not None else None
+            line, col = self._pos(expr)
             if isinstance(obj, (list, tuple, str)):
-                return obj[slice(start, stop, step)]
-            raise RTError("Cannot slice %s" % type(obj).__name__, expr.line)
+                try:
+                    return obj[slice(start, stop, step)]
+                except ValueError:
+                    raise RTError("Slice step cannot be zero", line, col)
+                except TypeError:
+                    raise RTError("Invalid slice bounds", line, col)
+            raise RTError("Cannot slice %s" % type(obj).__name__, line, col)
         if isinstance(expr, Member):
             obj = self.eval_expr(expr.obj, env)
+            line, col = self._pos(expr)
             if isinstance(obj, RenixxSuper):
                 defining = obj.defining_class
                 cur = defining.superclass if isinstance(defining.superclass, RenixxClass) else None
@@ -807,7 +913,7 @@ class Interpreter:
                                 bind_env.define("super", RenixxSuper(obj.instance, cur), mutable=True)
                             return RenixxFunction(m, bind_env, self)
                     cur = cur.superclass if isinstance(cur.superclass, RenixxClass) else None
-                raise RTError("No property '%s'" % expr.name, expr.line)
+                raise RTError("No property '%s'" % expr.name, line, col)
             if isinstance(obj, RenixxInstance):
                 # field?
                 if expr.name in obj.fields:
@@ -824,7 +930,7 @@ class Interpreter:
                                 bind_env.define("super", RenixxSuper(obj, cls), mutable=True)
                             return RenixxFunction(m, bind_env, self)
                     cls = cls.superclass if isinstance(cls.superclass, RenixxClass) else None
-                raise RTError("No property '%s'" % expr.name, expr.line)
+                raise RTError("No property '%s'" % expr.name, line, col)
             if isinstance(obj, dict):
                 if expr.name in obj:
                     return obj[expr.name]
@@ -837,7 +943,7 @@ class Interpreter:
                     return lambda: list(obj.values())
                 if expr.name == "has":
                     return lambda k: k in obj
-                raise RTError("No property '%s'" % expr.name, expr.line)
+                raise RTError("No property '%s'" % expr.name, line, col)
             if isinstance(obj, list):
                 if expr.name == "push":
                     return lambda x: (obj.append(x), None)[1]
@@ -863,7 +969,7 @@ class Interpreter:
                     return lambda f: [x for x in obj if f(x)]
                 if expr.name == "join":
                     return lambda sep="": sep.join(self.to_string(x) for x in obj)
-                raise RTError("No property '%s'" % expr.name, expr.line)
+                raise RTError("No property '%s'" % expr.name, line, col)
             if isinstance(obj, str):
                 if expr.name == "upper":
                     return lambda: obj.upper()
@@ -881,14 +987,14 @@ class Interpreter:
                     return lambda x: obj.startswith(x)
                 if expr.name == "endswith":
                     return lambda x: obj.endswith(x)
-                raise RTError("No property '%s'" % expr.name, expr.line)
+                raise RTError("No property '%s'" % expr.name, line, col)
             if isinstance(obj, RenixxClass):
                 # static? 
                 pass
             try:
                 return getattr(obj, expr.name)
-            except Exception:
-                raise RTError("No property '%s'" % expr.name, expr.line)
+            except AttributeError:
+                raise RTError("No property '%s'" % expr.name, line, col)
         if isinstance(expr, ListLiteral):
             result = []
             for e in expr.elements:
@@ -990,17 +1096,20 @@ class Interpreter:
             return self._builtin_range(start, stop, step)
         raise RTError("Unknown expression type: %s" % type(expr).__name__, getattr(expr, "line", 0))
 
-    def _compare(self, l, r, op):
+    def _compare(self, l, r, op, line=0, col=0):
         try:
             if op == "<": return l < r
             if op == ">": return l > r
             if op == "<=": return l <= r
             if op == ">=": return l >= r
         except TypeError:
-            raise RTError("Cannot compare %s and %s" % (type(l).__name__, type(r).__name__))
+            raise RTError(
+                "Cannot compare %s and %s" % (type(l).__name__, type(r).__name__),
+                line, col,
+            )
         return False
 
-    def call_callable(self, callee, args, kwargs, line):
+    def call_callable(self, callee, args, kwargs, line, col=0):
         if isinstance(callee, RenixxFunction):
             return self.call_function(callee, args, kwargs)
         if isinstance(callee, RenixxLambda):
@@ -1010,12 +1119,19 @@ class Interpreter:
             # convert args
             try:
                 return callee(*args, **kwargs)
-            except TypeError as e:
-                raise RTError(str(e), line)
+            except RTError as error:
+                # Position is known only at the call site, not inside builtins.
+                if not error.line:
+                    error.line = line
+                    if not error.col:
+                        error.col = col
+                raise
+            except (ZeroDivisionError, IndexError, KeyError, ValueError, TypeError) as error:
+                raise RTError(str(error), line, col)
         if isinstance(callee, RenixxBoundMethod) if False else False:
             pass
         # method reference stored as function with this? handle Member returning RenixxFunction for method: need instance binding
-        raise RTError("'%s' is not callable" % self.to_string(callee), line)
+        raise RTError("'%s' is not callable" % self.to_string(callee), line, col)
 
     def call_function(self, fn, args, kwargs):
         decl = fn.decl

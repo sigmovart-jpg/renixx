@@ -111,8 +111,25 @@ on a subclass instance.
 ## 8. Exception handling
 
 ```
-try { throw "boom" } catch e { print(e) } finally { cleanup() }
+try { risky() } catch e { print("failed:", e) } finally { cleanup() }
 ```
+
+`throw` accepts any value (string, number, list, dict, ...). `catch e`
+receives that value unchanged; for lists and dicts it is the same object.
+`finally` always runs, including when `return`, `break` or `continue`
+leaves the `try` block.
+
+Runtime errors (division by zero, out-of-range index, missing dict key,
+failed `int()`/`float()` conversion, invalid operand types, missing
+property, const reassignment, ...) are reported as `RuntimeError` with a
+source line and column. Inside `try`, such an error is caught and `catch e`
+receives its message as a string.
+
+An uncaught throw stops the program at the `throw` position. The CLI
+prints a runtime error for string values and `Uncaught: <value>` for any
+other value, both with exit code 1. Internal interpreter failures are not
+caught by `try`; the CLI reports them as `internal error: ...` and prints
+the traceback only with `--debug`.
 
 ## 9. Modules
 

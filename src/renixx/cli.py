@@ -2,13 +2,15 @@
 import sys
 import os
 import argparse
+import traceback
 from .interpreter import Interpreter
 from .parser import parse
 from .formatter import format_source
 from .lexer import tokenize
-from .errors import RenixxError
+from .errors import RenixxError, RuntimeError as RenixxRuntimeError, ThrowSignal
 
 VERSION = "1.0.0"
+_DEBUG = False
 
 _DIAGNOSTIC_CATEGORIES = {
     "semantic": ("SemanticError", "SemanticWarning"),
@@ -59,6 +61,42 @@ def print_renixx_error(error, path=None, src=None, stream=None):
     _print_source_context(src, getattr(error, "line", 0), getattr(error, "col", 0), stream)
     for name, line in reversed(getattr(error, "stack", None) or []):
         print("  at %s (line %s)" % (name, line), file=stream)
+
+
+def _print_thrown(thrown, interp, path=None, src=None, stream=None):
+    """Print an uncaught throw: strings read as runtime errors, others as values."""
+    if stream is None:
+        stream = sys.stderr
+    if isinstance(thrown.value, str):
+        error = RenixxRuntimeError(
+            thrown.value,
+            getattr(thrown, "line", 0),
+            getattr(thrown, "col", 0),
+            getattr(thrown, "stack", None),
+        )
+        print_renixx_error(error, path, src, stream)
+        return
+    _print_location(
+        path,
+        getattr(thrown, "line", 0),
+        getattr(thrown, "col", 0),
+        "Uncaught",
+        interp.to_string(thrown.value),
+        stream,
+    )
+    _print_source_context(src, getattr(thrown, "line", 0), getattr(thrown, "col", 0), stream)
+    for name, line in reversed(getattr(thrown, "stack", None) or []):
+        print("  at %s (line %s)" % (name, line), file=stream)
+
+
+def _report_internal_error(error, stream=None):
+    """Report an unexpected Python exception without masking it as a user error."""
+    if stream is None:
+        stream = sys.stderr
+    print("internal error: %s: %s" % (type(error).__name__, error), file=stream)
+    print("renixx: this is a bug in the Renixx interpreter, not in your program", file=stream)
+    if _DEBUG:
+        traceback.print_exc(file=sys.stderr)
 
 
 def _diagnostic_category(diag):
@@ -161,10 +199,13 @@ def run_file(path, args):
     except RenixxError as e:
         print_renixx_error(e, path, src)
         return 1
+    except ThrowSignal as thrown:
+        _print_thrown(thrown, interp, path, src)
+        return 1
     except SystemExit as e:
         return e.code if isinstance(e.code, int) else 0
     except Exception as e:
-        print("renixx: %s: %s" % (type(e).__name__, e), file=sys.stderr)
+        _report_internal_error(e)
         return 1
     return 0
 
@@ -196,8 +237,10 @@ def repl():
                 interp.run(program, interp.globals_env)
             except RenixxError as e:
                 print_renixx_error(e, path, src, stream=sys.stdout)
+            except ThrowSignal as thrown:
+                _print_thrown(thrown, interp, path, src, sys.stdout)
             except Exception as e:
-                print("Error: %s: %s" % (type(e).__name__, e))
+                _report_internal_error(e, sys.stdout)
             continue
         if line.strip() == ":reset":
             interp = Interpreter()
@@ -219,8 +262,10 @@ def repl():
             interp.run(program, interp.globals_env)
         except RenixxError as e:
             print_renixx_error(e, "<repl>", buf, stream=sys.stdout)
+        except ThrowSignal as thrown:
+            _print_thrown(thrown, interp, "<repl>", buf, sys.stdout)
         except Exception as e:
-            print("Error: %s: %s" % (type(e).__name__, e))
+            _report_internal_error(e, sys.stdout)
         buf = ""
 
 def check_file(path, syntax_only=False):
@@ -254,8 +299,13 @@ def check_file(path, syntax_only=False):
     return 0
 
 def main(argv=None):
+    global _DEBUG
     if argv is None:
         argv = sys.argv[1:]
+    argv = list(argv)
+    if "--debug" in argv:
+        _DEBUG = True
+        argv = [arg for arg in argv if arg != "--debug"]
     if not argv:
         repl()
         return 0
@@ -272,6 +322,8 @@ def main(argv=None):
         print("  fmt <file>             Format source (prints to stdout)")
         print("  lsp                    Start language server (stdio)")
         print("  version                Show version")
+        print("Global options:")
+        print("  --debug                Show tracebacks for internal interpreter errors")
         return 0
     if cmd == "run":
         if len(argv) < 2:
@@ -312,7 +364,7 @@ def main(argv=None):
             print_renixx_error(e, path, src)
             return 1
         except Exception as e:
-            print("renixx: %s: %s" % (type(e).__name__, e), file=sys.stderr)
+            _report_internal_error(e)
             return 1
         if len(argv) > 2 and argv[2] == "-w":
             open(path, "w", encoding="utf-8").write(out)

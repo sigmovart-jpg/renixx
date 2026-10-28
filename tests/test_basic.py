@@ -239,7 +239,7 @@ def test_break_and_continue_still_work_normally():
 
 def test_try_catch_still_catches_runtime_errors():
     src = 'try { throw "boom" } catch e { print("caught", e) }'
-    assert run(src) == ["caught RuntimeError: boom"]
+    assert run(src) == ["caught boom"]
 
 
 # ---- control-flow signals are confined to their function ----
