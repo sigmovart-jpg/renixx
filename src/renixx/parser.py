@@ -102,6 +102,27 @@ class Parser:
         # optional trailing semicolon/newline handled by caller
         return ExprStmt(expr=expr, line=expr.line)
 
+    def parse_type_annotation(self):
+        if self.current().type != "IDENT":
+            raise ParseError("Expected type name", self.current().line, self.current().col)
+        col = self.current().col
+        name = self.advance().value
+        if self.current().type == "LBRACKET":
+            self.advance()
+            self.skip_newlines()
+            args = [self.parse_type_annotation()[0]]
+            self.skip_newlines()
+            while self.current().type == "OP" and self.current().value == ",":
+                self.advance()
+                self.skip_newlines()
+                arg_name, _ = self.parse_type_annotation()
+                args.append(arg_name)
+                self.skip_newlines()
+            self.expect("RBRACKET", "]")
+            annot = name + "[" + ", ".join(args) + "]"
+            return annot, col
+        return name, col
+
     def parse_let(self, is_const):
         kw_tok = self.advance()  # let/const
         # destructuring: let [a, b] = expr  or  let {a, b} = expr
@@ -151,9 +172,9 @@ class Parser:
         type_annot_col = 0
         if self.current().type == "OP" and self.current().value == ":":
             self.advance()
+            self.skip_newlines()
             if self.current().type == "IDENT":
-                type_annot_col = self.current().col
-                type_annot = self.advance().value
+                type_annot, type_annot_col = self.parse_type_annotation()
         value = None
         if self.match("OP", "="):
             value = self.parse_expression()
@@ -178,9 +199,8 @@ class Parser:
             self.advance()
             self.skip_newlines()
             if self.current().type == "IDENT":
-                return_type_col = self.current().col
                 return_type_line = self.current().line
-                return_type = self.advance().value
+                return_type, return_type_col = self.parse_type_annotation()
         self.skip_newlines()
         body = self.parse_block()
         return FnDecl(name=name, params=params, body=body, return_type=return_type, line=kw.line, name_col=name_col, return_type_col=return_type_col, return_type_line=return_type_line)
@@ -203,10 +223,10 @@ class Parser:
                 annot_line = 0
                 if self.current().type == "OP" and self.current().value == ":":
                     self.advance()
+                    self.skip_newlines()
                     if self.current().type == "IDENT":
-                        annot_col = self.current().col
                         annot_line = self.current().line
-                        annot = self.advance().value
+                        annot, annot_col = self.parse_type_annotation()
                 params.append((pname, None, True, annot, annot_col, annot_line))
             elif self.current().type == "IDENT":
                 pname = self.advance().value
@@ -215,10 +235,10 @@ class Parser:
                 annot_line = 0
                 if self.current().type == "OP" and self.current().value == ":":
                     self.advance()
+                    self.skip_newlines()
                     if self.current().type == "IDENT":
-                        annot_col = self.current().col
                         annot_line = self.current().line
-                        annot = self.advance().value
+                        annot, annot_col = self.parse_type_annotation()
                 default = None
                 if self.match("OP", "="):
                     default = self.parse_expression()
@@ -673,10 +693,10 @@ class Parser:
         tok = self.current()
         if tok.type == "NUMBER":
             self.advance()
-            return Literal(value=tok.value, line=tok.line)
+            return Literal(value=tok.value, line=tok.line, col=tok.col)
         if tok.type == "STRING":
             self.advance()
-            return Literal(value=tok.value, line=tok.line)
+            return Literal(value=tok.value, line=tok.line, col=tok.col)
         if tok.type == "FSTRING":
             self.advance()
             parts = []
@@ -692,7 +712,7 @@ class Parser:
             return InterpolatedString(parts=parts, line=tok.line)
         if tok.type == "KEYWORD" and tok.value in ("true", "false"):
             self.advance()
-            return Literal(value=(tok.value == "true"), line=tok.line)
+            return Literal(value=(tok.value == "true"), line=tok.line, col=tok.col)
         if tok.type == "KEYWORD" and tok.value == "nil":
             self.advance()
             return Literal(value=None, line=tok.line)
@@ -774,7 +794,7 @@ class Parser:
             self.skip_newlines()
             if self.current().type == "RBRACKET":
                 self.expect("RBRACKET", "]")
-                return ListLiteral(elements=[], line=tok.line)
+                return ListLiteral(elements=[], line=tok.line, col=tok.col)
             # spread as first element
             if self.current().type == "OP" and self.current().value == "...":
                 self.advance()
@@ -813,7 +833,7 @@ class Parser:
                     elems.append(self.parse_expression())
                 self.skip_newlines()
             self.expect("RBRACKET", "]")
-            return ListLiteral(elements=elems, line=tok.line)
+            return ListLiteral(elements=elems, line=tok.line, col=tok.col)
         if tok.type == "LBRACE":
             saved = self.pos
             self.advance()
@@ -871,7 +891,7 @@ class Parser:
                     pairs.append((key, val))
                     self.skip_newlines()
                 self.expect("RBRACE", "}")
-                return DictLiteral(pairs=pairs, line=tok.line)
+                return DictLiteral(pairs=pairs, line=tok.line, col=tok.col)
             raise ParseError("Unexpected '{'", tok.line)
         if tok.type == "OP" and tok.value == "[":
             pass

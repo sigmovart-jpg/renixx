@@ -1,0 +1,3 @@
+let xs: list = [1, "a"]
+let d: dict = {"a": 1, "b": "x"}
+print(xs, d)

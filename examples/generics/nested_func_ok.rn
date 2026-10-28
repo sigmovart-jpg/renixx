@@ -1,0 +1,2 @@
+fn wrap(xs: list[list[int]]) -> list[list[int]] { return xs }
+print(wrap([[1,2],[3]]))

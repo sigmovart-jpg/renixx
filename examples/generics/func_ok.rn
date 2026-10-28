@@ -1,0 +1,2 @@
+fn f(x: list[int]) -> list[int] { return x }
+print(f([1,2,3]))

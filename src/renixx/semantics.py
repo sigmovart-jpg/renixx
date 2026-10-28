@@ -67,6 +67,7 @@ class SemanticAnalyzer:
         self.diagnostics.append({
             "line": line, "col": col, "end_col": end_col,
             "message": message, "severity": severity,
+            "source": "semantic",
         })
 
     def analyze(self, program):
@@ -93,6 +94,19 @@ class SemanticAnalyzer:
         for s in stmts:
             self._analyze_stmt(s, scope)
 
+    def _register_pattern_bindings(self, pat, scope):
+        """Register names declared by a match pattern.
+
+        A bare identifier is a binding pattern; ``_`` is a wildcard and binds
+        nothing. Both are declarations, so they must not be analyzed as
+        variable uses. Any other pattern form is an expression.
+        """
+        if not isinstance(pat, Identifier):
+            return False
+        if pat.name != "_":
+            scope.define(pat.name, "variable")
+        return True
+
     def _analyze_stmt(self, s, scope):
         if s is None:
             return
@@ -114,33 +128,8 @@ class SemanticAnalyzer:
                                    "Variable '%s' already defined in this scope" % s.name, 2,
                                    name_col + len(s.name))
                 scope.define(s.name, "variable")
-            if getattr(s, "type_annot", None):
-                ta_col = getattr(s, "type_annot_col", 0)
-                if ta_col:
-                    ta_col = max(0, ta_col - 1)
-                else:
-                    ta_col = self._col_of(s.line, s.type_annot)
-                if s.type_annot not in TYPE_NAMES:
-                    self._add_diag(s.line, ta_col,
-                                   "Unknown type '%s'" % s.type_annot, 2,
-                                   ta_col + len(s.type_annot))
-                # static type check for literals
-                if s.value is not None and isinstance(s.value, Literal):
-                    actual = None
-                    v = s.value.value
-                    if v is None:
-                        actual = "nil"
-                    elif isinstance(v, bool):
-                        actual = "bool"
-                    elif isinstance(v, int):
-                        actual = "int"
-                    elif isinstance(v, float):
-                        actual = "float"
-                    elif isinstance(v, str):
-                        actual = "string"
-                    if actual is not None and actual != s.type_annot:
-                        self._add_diag(s.line, ta_col, "Type error: expected %s, got %s" % (s.type_annot, actual), 1,
-                                       ta_col + len(s.type_annot))
+            # Type checking is handled by the separate type checker module.
+            # Semantic analyzer only does scope resolution here.
             return
         if isinstance(s, DestructureStmt):
             if s.value is not None:
@@ -221,11 +210,16 @@ class SemanticAnalyzer:
         if isinstance(s, MatchStmt):
             self._analyze_expr(s.expr, scope)
             for pat, guard, body in s.cases:
-                if pat is not None:
+                # Each case gets its own scope: pattern bindings are visible
+                # in the guard and body, but must not leak into other cases
+                # or out of the match statement.
+                case_scope = Scope(scope)
+                is_name_pattern = self._register_pattern_bindings(pat, case_scope)
+                if pat is not None and not is_name_pattern:
                     self._analyze_expr(pat, scope)
                 if guard is not None:
-                    self._analyze_expr(guard, scope)
-                self._analyze_stmt(body, Scope(scope))
+                    self._analyze_expr(guard, case_scope)
+                self._analyze_stmt(body, case_scope)
             return
         if isinstance(s, TryStmt):
             self._analyze_stmt(s.try_block, scope)

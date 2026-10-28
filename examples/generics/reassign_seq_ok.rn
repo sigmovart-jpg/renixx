@@ -1,0 +1,4 @@
+let x: list[int] = [1]
+x = [2,3]
+x = [4]
+print(x)

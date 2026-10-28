@@ -5,53 +5,161 @@ import argparse
 from .interpreter import Interpreter
 from .parser import parse
 from .formatter import format_source
-from .lsp import main as lsp_main
 from .lexer import tokenize
 from .errors import RenixxError
 
 VERSION = "1.0.0"
+
+_DIAGNOSTIC_CATEGORIES = {
+    "semantic": ("SemanticError", "SemanticWarning"),
+    "typechecker": ("TypeError", "TypeWarning"),
+}
+
+
+def _read_source(path):
+    with open(path, encoding="utf-8") as handle:
+        return handle.read()
+
+
+def _print_location(path, line, col, category, message, stream):
+    location = path or "<input>"
+    if line and line > 0:
+        location += ":%d" % line
+        if col and col > 0:
+            location += ":%d" % col
+    print("%s: %s: %s" % (location, category, message), file=stream)
+
+
+def _print_source_context(src, line, col, stream):
+    if not src or not line or line < 1:
+        return
+    lines = src.splitlines()
+    if line > len(lines):
+        return
+    text = lines[line - 1]
+    print("  | " + text, file=stream)
+    caret = max(0, (col or 1) - 1)
+    if caret > len(text):
+        caret = len(text)
+    print("  | " + " " * caret + "^", file=stream)
+
+
+def print_renixx_error(error, path=None, src=None, stream=None):
+    """Print a RenixxError as a location line plus source context."""
+    if stream is None:
+        stream = sys.stderr
+    _print_location(
+        path,
+        getattr(error, "line", 0),
+        getattr(error, "col", 0),
+        getattr(error, "kind", "Error"),
+        getattr(error, "message", str(error)),
+        stream,
+    )
+    _print_source_context(src, getattr(error, "line", 0), getattr(error, "col", 0), stream)
+    for name, line in reversed(getattr(error, "stack", None) or []):
+        print("  at %s (line %s)" % (name, line), file=stream)
+
+
+def _diagnostic_category(diag):
+    source = diag.get("source", "")
+    names = _DIAGNOSTIC_CATEGORIES.get(source)
+    if names is not None:
+        severity = diag.get("severity", 1) or 1
+        return names[0] if severity <= 1 else names[1]
+    return source.capitalize() if source else "Diagnostic"
+
+
+def _merge_diagnostics(*groups):
+    seen = set()
+    merged = []
+    for group in groups:
+        for diag in group:
+            key = (diag.get("line"), diag.get("col"), diag.get("end_col"), diag.get("message"))
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(diag)
+    merged.sort(key=lambda d: (d.get("line") or 0, d.get("col") or 0, d.get("message") or ""))
+    return merged
+
+
+def print_diagnostics(diagnostics, path=None, src=None, stream=None):
+    """Print analyzer diagnostics using the shared CLI format."""
+    if stream is None:
+        stream = sys.stderr
+    for diag in diagnostics:
+        line = diag.get("line") or 0
+        col0 = diag.get("col")
+        # Analyzer diagnostics use 0-based columns; display 1-based ones.
+        col = (col0 + 1) if isinstance(col0, int) and col0 >= 0 else None
+        _print_location(path, line, col, _diagnostic_category(diag), diag.get("message", ""), stream)
+        _print_source_context(src, line, col, stream)
+
+
+def _static_diagnostics(path, src, program):
+    """Run the existing analyzers and merge their diagnostics.
+
+    Returns None when the semantic analyzer fails unexpectedly; the failure is
+    reported to stderr and the caller must treat the check as failed.
+    """
+    try:
+        from .semantics import analyze as semantic_analyze
+        semantic_diags, parse_error = semantic_analyze(src)
+    except Exception as exc:
+        print("renixx: semantic analysis failed: %s: %s" % (type(exc).__name__, exc), file=sys.stderr)
+        return None
+    if parse_error is not None:
+        print_renixx_error(parse_error, path, src)
+        return None
+
+    type_diags = []
+    type_check_completed = False
+    try:
+        from .typechecker import TypeChecker
+        type_diags = TypeChecker(src).check(program)
+        type_check_completed = True
+    except Exception as exc:
+        # The type checker is an optional analyzer; report why it could not
+        # run instead of pretending the program passed type checking.
+        print("renixx: warning: type checking unavailable: %s: %s" % (type(exc).__name__, exc),
+              file=sys.stderr)
+
+    if type_check_completed:
+        # Parameterized annotations are understood by TypeChecker but not by
+        # the older semantic analyzer, which reports them as unknown types.
+        semantic_diags = [
+            d for d in semantic_diags
+            if not (
+                d.get("message", "").startswith("Unknown type '")
+                and "[" in d.get("message", "")
+            )
+        ]
+
+    return _merge_diagnostics(semantic_diags, type_diags)
+
 
 def run_file(path, args):
     if not os.path.exists(path):
         print("renixx: file not found: %s" % path, file=sys.stderr)
         return 1
     try:
-        src = open(path, encoding="utf-8").read()
+        src = _read_source(path)
     except Exception as e:
         print("renixx: cannot read file: %s" % e, file=sys.stderr)
         return 1
     # set os args
-    import sys as _sys
-    _sys.argv = [path] + list(args)
+    sys.argv = [path] + list(args)
     try:
         program = parse(src)
     except RenixxError as e:
-        print(str(e), file=sys.stderr)
-        # show source context
-        if e.line and 1 <= e.line <= len(src.splitlines()):
-            lines = src.splitlines()
-            print("  | " + lines[e.line - 1], file=sys.stderr)
-            print("  | " + " " * max(0, (e.col or 1) - 1) + "^", file=sys.stderr)
-        if getattr(e, "stack", None):
-            for name, line in reversed(e.stack):
-                print("  at %s (line %s)" % (name, line), file=sys.stderr)
+        print_renixx_error(e, path, src)
         return 1
     interp = Interpreter()
-    # inject script path into os module? already via sys.argv
     try:
-        interp.eval_file(path) if False else None
-        # run with env
         interp.run(program, interp.globals_env)
     except RenixxError as e:
-        print(str(e), file=sys.stderr)
-        # show source context
-        if e.line and 1 <= e.line <= len(src.splitlines()):
-            lines = src.splitlines()
-            print("  | " + lines[e.line - 1], file=sys.stderr)
-            print("  | " + " " * max(0, (e.col or 1) - 1) + "^", file=sys.stderr)
-        if getattr(e, "stack", None):
-            for name, line in reversed(e.stack):
-                print("  at %s (line %s)" % (name, line), file=sys.stderr)
+        print_renixx_error(e, path, src)
         return 1
     except SystemExit as e:
         return e.code if isinstance(e.code, int) else 0
@@ -79,11 +187,17 @@ def repl():
         if line.strip().startswith(":load "):
             path = line.strip()[6:].strip()
             try:
-                src = open(path, encoding="utf-8").read()
+                src = _read_source(path)
+            except Exception as e:
+                print("Error: cannot read file: %s" % e)
+                continue
+            try:
                 program = parse(src)
                 interp.run(program, interp.globals_env)
+            except RenixxError as e:
+                print_renixx_error(e, path, src, stream=sys.stdout)
             except Exception as e:
-                print("Error:", e)
+                print("Error: %s: %s" % (type(e).__name__, e))
             continue
         if line.strip() == ":reset":
             interp = Interpreter()
@@ -104,34 +218,40 @@ def repl():
         try:
             interp.run(program, interp.globals_env)
         except RenixxError as e:
-            print(str(e))
-            if getattr(e, "stack", None):
-                for name, line in reversed(e.stack):
-                    print("  at %s (line %s)" % (name, line))
+            print_renixx_error(e, "<repl>", buf, stream=sys.stdout)
         except Exception as e:
-            print("Error:", e)
+            print("Error: %s: %s" % (type(e).__name__, e))
         buf = ""
 
-def check_file(path):
+def check_file(path, syntax_only=False):
     if not os.path.exists(path):
         print("renixx: file not found: %s" % path, file=sys.stderr)
         return 1
-    src = open(path, encoding="utf-8").read()
     try:
-        parse(src)
+        src = _read_source(path)
+    except Exception as e:
+        print("renixx: cannot read file: %s" % e, file=sys.stderr)
+        return 1
+    try:
+        program = parse(src)
+    except RenixxError as e:
+        print_renixx_error(e, path, src)
+        return 1
+    if syntax_only:
         print("%s: OK" % path)
         return 0
-    except RenixxError as e:
-        print(str(e), file=sys.stderr)
-        # show source context
-        if e.line and 1 <= e.line <= len(src.splitlines()):
-            lines = src.splitlines()
-            print("  | " + lines[e.line - 1], file=sys.stderr)
-            print("  | " + " " * max(0, (e.col or 1) - 1) + "^", file=sys.stderr)
-        if getattr(e, "stack", None):
-            for name, line in reversed(e.stack):
-                print("  at %s (line %s)" % (name, line), file=sys.stderr)
+    diagnostics = _static_diagnostics(path, src, program)
+    if diagnostics is None:
         return 1
+    if not diagnostics:
+        print("%s: OK" % path)
+        return 0
+    print_diagnostics(diagnostics, path, src)
+    has_errors = any((d.get("severity", 1) or 1) <= 1 for d in diagnostics)
+    if has_errors:
+        return 1
+    print("%s: OK" % path)
+    return 0
 
 def main(argv=None):
     if argv is None:
@@ -148,7 +268,7 @@ def main(argv=None):
         print("Commands:")
         print("  run <file> [args...]   Run a Renixx program")
         print("  repl                   Start interactive REPL")
-        print("  check <file>           Check syntax")
+        print("  check <file> [--syntax-only]  Check syntax, semantics and types")
         print("  fmt <file>             Format source (prints to stdout)")
         print("  lsp                    Start language server (stdio)")
         print("  version                Show version")
@@ -165,7 +285,14 @@ def main(argv=None):
         if len(argv) < 2:
             print("renixx: missing file", file=sys.stderr)
             return 1
-        return check_file(argv[1])
+        syntax_only = False
+        for flag in argv[2:]:
+            if flag == "--syntax-only":
+                syntax_only = True
+            else:
+                print("renixx: unknown option for check: %s" % flag, file=sys.stderr)
+                return 1
+        return check_file(argv[1], syntax_only=syntax_only)
     if cmd == "fmt":
         if len(argv) < 2:
             print("renixx: missing file", file=sys.stderr)
@@ -174,11 +301,18 @@ def main(argv=None):
         if not os.path.exists(path):
             print("renixx: file not found: %s" % path, file=sys.stderr)
             return 1
-        src = open(path, encoding="utf-8").read()
+        try:
+            src = _read_source(path)
+        except Exception as e:
+            print("renixx: cannot read file: %s" % e, file=sys.stderr)
+            return 1
         try:
             out = format_source(src)
         except RenixxError as e:
-            print(str(e), file=sys.stderr)
+            print_renixx_error(e, path, src)
+            return 1
+        except Exception as e:
+            print("renixx: %s: %s" % (type(e).__name__, e), file=sys.stderr)
             return 1
         if len(argv) > 2 and argv[2] == "-w":
             open(path, "w", encoding="utf-8").write(out)
@@ -187,6 +321,11 @@ def main(argv=None):
             print(out, end="")
         return 0
     if cmd == "lsp":
+        try:
+            from .lsp import main as lsp_main
+        except Exception as e:
+            print("renixx: cannot start language server: %s: %s" % (type(e).__name__, e), file=sys.stderr)
+            return 1
         lsp_main()
         return 0
     # if first arg is a file, run it

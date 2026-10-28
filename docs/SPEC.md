@@ -50,6 +50,11 @@ Other: `.` (member), `[]` (index), `()` (call), `? :` (ternary),
 `class`, `instance`. Truthiness: nil and false and 0 and empty containers
 are falsy; everything else truthy.
 
+Optional type annotations may use parameterized types: `list[int]`,
+`dict[string, int]`, `list[list[int]]`. Unannotated code is never
+checked. Annotations are validated both by the static type checker and
+at runtime.
+
 ## 4. Variables
 
 ```
@@ -140,6 +145,9 @@ sum sorted reversed enumerate zip keys values`.
 - `os`: `env args cwd platform exit`
 - `fs`: `read_file write_file append_file exists list_dir mkdir remove
   is_file is_dir`
+- `re`: `match search findall sub split`
+- `http`: `get post`
+- `collections`: `Counter defaultdict`
 
 ## 11. Grammar
 

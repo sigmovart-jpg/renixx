@@ -357,10 +357,85 @@ class Interpreter:
     def _check_type(self, value, annot):
         if annot is None:
             return
+        annot = str(annot).strip()
+        if annot in ("any", "unknown"):
+            return
+        # Extract base type name (before '[')
+        base = annot.split("[")[0].strip()
         actual = self._type_name(value)
-        if annot != actual:
-            # allow int/float coercion? strict
-            raise RTError("Type error: expected %s, got %s" % (annot, actual))
+        # nil handling
+        if value is None:
+            if base == "nil":
+                return
+            raise RTError("Type error: expected %s, got nil" % annot)
+        if base != actual:
+            # allow int -> float coercion
+            if base == "float" and actual == "int":
+                pass
+            else:
+                raise RTError("Type error: expected %s, got %s" % (annot, actual))
+        # Check container element types
+        if base == "list" and isinstance(value, list):
+            # Parse element type from annot: list[X] or list[X, ...]
+            elem_annot = None
+            if "[" in annot:
+                inner = annot[annot.find("[")+1:annot.rfind("]")]
+                # split top-level by comma
+                depth = 0
+                parts = []
+                cur = ""
+                for ch in inner:
+                    if ch == "[":
+                        depth += 1
+                        cur += ch
+                    elif ch == "]":
+                        depth -= 1
+                        cur += ch
+                    elif ch == "," and depth == 0:
+                        parts.append(cur.strip())
+                        cur = ""
+                    else:
+                        cur += ch
+                if cur.strip():
+                    parts.append(cur.strip())
+                if parts:
+                    elem_annot = parts[0]
+            if elem_annot is not None:
+                for elem in value:
+                    self._check_type(elem, elem_annot)
+        elif base == "dict" and isinstance(value, dict):
+            key_annot = None
+            val_annot = None
+            if "[" in annot:
+                inner = annot[annot.find("[")+1:annot.rfind("]")]
+                depth = 0
+                parts = []
+                cur = ""
+                for ch in inner:
+                    if ch == "[":
+                        depth += 1
+                        cur += ch
+                    elif ch == "]":
+                        depth -= 1
+                        cur += ch
+                    elif ch == "," and depth == 0:
+                        parts.append(cur.strip())
+                        cur = ""
+                    else:
+                        cur += ch
+                if cur.strip():
+                    parts.append(cur.strip())
+                if len(parts) >= 2:
+                    key_annot = parts[0]
+                    val_annot = parts[1]
+                elif len(parts) == 1:
+                    val_annot = parts[0]
+            if key_annot is not None:
+                for k in value:
+                    self._check_type(k, key_annot)
+            if val_annot is not None:
+                for v in value.values():
+                    self._check_type(v, val_annot)
 
     def _bind_one(self, env, name, value, annot):
         self._check_type(value, annot)
@@ -373,8 +448,15 @@ class Interpreter:
         self.current_env = env
         from .errors import set_current_stack
         set_current_stack(self.call_stack)
-        for stmt in program.statements:
-            self.exec_stmt(stmt, env)
+        try:
+            for stmt in program.statements:
+                self.exec_stmt(stmt, env)
+        except ReturnValue as sig:
+            raise RTError("'return' outside function", getattr(sig, "line", 0))
+        except BreakSignal as sig:
+            raise RTError("'break' outside loop", getattr(sig, "line", 0))
+        except ContinueSignal as sig:
+            raise RTError("'continue' outside loop", getattr(sig, "line", 0))
         return None
 
     def exec_stmt(self, stmt, env):
@@ -469,22 +551,28 @@ class Interpreter:
             for pat, guard, body in stmt.cases:
                 if pat is None:
                     # default
-                    if guard is None or self._truthy(self.eval_expr(guard, env)):
-                        self._exec_match_body(body, env)
+                    case_env = Environment(env)
+                    if guard is None or self._truthy(self.eval_expr(guard, case_env)):
+                        self._exec_match_body(body, case_env)
                         matched = True
                         break
                     continue
                 # pattern matching
-                if self._match_pattern(pat, val, env):
-                    if guard is not None and not self._truthy(self.eval_expr(guard, env)):
+                case_env = Environment(env)
+                if self._match_pattern(pat, val, case_env):
+                    if guard is not None and not self._truthy(self.eval_expr(guard, case_env)):
                         continue
-                    self._exec_match_body(body, env)
+                    self._exec_match_body(body, case_env)
                     matched = True
                     break
             return
         if isinstance(stmt, TryStmt):
             try:
                 self.exec_stmt(stmt.try_block, env)
+            except (ReturnValue, BreakSignal, ContinueSignal):
+                # Control-flow signals are not errors: let them reach the
+                # enclosing function/loop instead of swallowing them here.
+                raise
             except Exception as e:
                 if stmt.catch_block is not None:
                     new_env = Environment(env)
@@ -503,14 +591,20 @@ class Interpreter:
             v = None
             if stmt.value is not None:
                 v = self.eval_expr(stmt.value, env)
-            raise ReturnValue(v)
+            signal = ReturnValue(v)
+            signal.line = stmt.line
+            raise signal
         if isinstance(stmt, ThrowStmt):
             v = self.eval_expr(stmt.value, env)
             raise RTError(self.to_string(v))
         if isinstance(stmt, BreakStmt):
-            raise BreakSignal()
+            signal = BreakSignal()
+            signal.line = stmt.line
+            raise signal
         if isinstance(stmt, ContinueStmt):
-            raise ContinueSignal()
+            signal = ContinueSignal()
+            signal.line = stmt.line
+            raise signal
         if isinstance(stmt, ImportStmt):
             self.exec_import(stmt, env)
             return
@@ -527,14 +621,16 @@ class Interpreter:
         if isinstance(pat, Literal):
             return pat.value == val
         if isinstance(pat, Identifier):
-            # binding pattern: bind val to name in env? For simplicity, treat identifier as binding (always matches)
-            # But if it's a known const/variable, compare equality
+            if pat.name == "_":
+                # wildcard: always matches, no binding
+                return True
+            # binding pattern: bind val to name in env
             if env.has(pat.name):
                 try:
                     return env.get(pat.name) == val
                 except Exception:
                     pass
-            # binding: define in a new scope? We'll just accept match and optionally bind not needed
+            env.define(pat.name, val, mutable=True)
             return True
         if isinstance(pat, BinaryOp) and pat.op == "|":
             # not parsed; skip
@@ -692,22 +788,16 @@ class Interpreter:
                 # field?
                 if expr.name in obj.fields:
                     return obj.fields[expr.name]
-                # method?
-                for m in obj.cls.decl.methods:
-                    if m.name == expr.name:
-                        # bind this
-                        bind_env = Environment(obj.cls.env if hasattr(obj.cls, 'env') else self.globals_env)
-                        bind_env.define("this", obj, mutable=True)
-                        # also expose fields as variables? Access via this.field in code; but code uses this.x. Fine.
-                        return RenixxFunction(m, bind_env, self)
-                # superclass
-                if isinstance(obj.cls.superclass, RenixxClass):
-                    sc = obj.cls.superclass
-                    for m in sc.decl.methods:
+                # method? walk full superclass chain
+                cls = obj.cls
+                while isinstance(cls, RenixxClass):
+                    for m in cls.decl.methods:
                         if m.name == expr.name:
-                            bind_env = Environment(sc.env)
+                            # bind this
+                            bind_env = Environment(cls.env if hasattr(cls, 'env') else self.globals_env)
                             bind_env.define("this", obj, mutable=True)
                             return RenixxFunction(m, bind_env, self)
+                    cls = cls.superclass if isinstance(cls.superclass, RenixxClass) else None
                 raise RTError("No property '%s'" % expr.name, expr.line)
             if isinstance(obj, dict):
                 if expr.name in obj:
@@ -832,10 +922,17 @@ class Interpreter:
             # call init
             args = [self.eval_expr(a, env) for a in expr.args]
             init_method = None
-            for m in cls.decl.methods:
-                if m.name == "init":
-                    init_method = m
+            # walk full superclass chain to find init
+            cur = cls
+            while isinstance(cur, RenixxClass):
+                for m in cur.decl.methods:
+                    if m.name == "init":
+                        init_method = m
+                        cls = cur  # use the class where init was found for env
+                        break
+                if init_method is not None:
                     break
+                cur = cur.superclass if isinstance(cur.superclass, RenixxClass) else None
             if init_method is not None:
                 # execute init with this=instance
                 fn_env = Environment(cls.env)
@@ -908,6 +1005,10 @@ class Interpreter:
             if getattr(decl, "return_type", None):
                 self._check_type(rv.value, decl.return_type)
             return rv.value
+        except BreakSignal as sig:
+            raise RTError("'break' outside loop", getattr(sig, "line", 0))
+        except ContinueSignal as sig:
+            raise RTError("'continue' outside loop", getattr(sig, "line", 0))
         finally:
             if self.call_stack:
                 self.call_stack.pop()

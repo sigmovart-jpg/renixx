@@ -7,6 +7,7 @@ from .lexer import tokenize
 from .errors import RenixxError, ParseError, LexError
 from .ast import *
 from .semantics import analyze as semantic_analyze
+from .typechecker import TypeChecker
 
 # ---- JSON-RPC transport ----
 def read_message():
@@ -81,9 +82,46 @@ def analyze(uri, text):
     asts.pop(uri + "::err", None)
     # semantic analysis
     sem_diags, _ = semantic_analyze(text)
+    # type checking (wrapped in try/except to avoid LSP crashes)
+    type_diags = []
+    type_check_completed = False
+    try:
+        checker = TypeChecker(text)
+        type_diags = checker.check(program)
+        type_check_completed = True
+    except Exception as e:
+        # Don't crash LSP on type checker errors
+        pass
+    if type_check_completed:
+        # Generic annotations are validated by TypeChecker; the older
+        # semantic analyzer does not understand parameterized type syntax.
+        sem_diags = [
+            d for d in sem_diags
+            if not (
+                d.get("message", "").startswith("Unknown type '")
+                and "[" in d.get("message", "")
+            )
+        ]
+    # combine and deduplicate diagnostics
+    all_diags = list(sem_diags) + list(type_diags)
+    # Identical diagnostics from different analyzers share a source location.
+    # Keep same-message diagnostics at distinct locations on the same line.
+    seen_diagnostics = set()
+    unique_diags = []
+    for d in all_diags:
+        key = (
+            d.get("line"),
+            d.get("col"),
+            d.get("end_col"),
+            d.get("message"),
+        )
+        if key in seen_diagnostics:
+            continue
+        seen_diagnostics.add(key)
+        unique_diags.append(d)
     lsp_diags = []
     lines = text.splitlines()
-    for d in sem_diags:
+    for d in unique_diags:
         line = max(0, d["line"] - 1)
         col = max(0, d["col"])
         end_col = d.get("end_col", col + 1)
@@ -139,51 +177,92 @@ def find_definitions(program, text=None):
     if program is None:
         return defs
     lines = (text or "").splitlines()
+    tokens = tokenize(text or "")
     def col_of(line_no, name):
         if line_no < 1 or line_no > len(lines):
             return 0
         s = lines[line_no - 1]
         idx = s.find(name)
         return idx if idx >= 0 else 0
+
+    def add_named_definition(stmt, kind):
+        if not stmt.name:
+            return
+        col = getattr(stmt, "name_col", 0)
+        if col:
+            col = max(0, col - 1)
+        else:
+            col = col_of(stmt.line, stmt.name)
+        defs.append((stmt.name, kind, stmt.line - 1, col))
+
+    used_destructure_tokens = set()
+
+    def add_destructure_definitions(stmt):
+        open_type, close_type = (
+            ("LBRACKET", "RBRACKET")
+            if stmt.kind == "list"
+            else ("LBRACE", "RBRACE")
+        )
+        for start, token in enumerate(tokens):
+            if (
+                token.type != "KEYWORD"
+                or token.value not in ("let", "const")
+                or token.line != stmt.line
+                or start in used_destructure_tokens
+            ):
+                continue
+            opening = start + 1
+            while opening < len(tokens) and tokens[opening].type == "NEWLINE":
+                opening += 1
+            if opening >= len(tokens) or tokens[opening].type != open_type:
+                continue
+            names = []
+            name_tokens = []
+            for candidate in tokens[opening + 1:]:
+                if candidate.type == close_type:
+                    break
+                if candidate.type == "IDENT":
+                    names.append(candidate.value)
+                    name_tokens.append(candidate)
+            if names != stmt.names:
+                continue
+            used_destructure_tokens.add(start)
+            for name, name_token in zip(stmt.names, name_tokens):
+                defs.append((
+                    name,
+                    "variable",
+                    name_token.line - 1,
+                    max(0, name_token.col - 1),
+                ))
+            return
+
+    def visit_declarations(node):
+        if node is None:
+            return
+        if isinstance(node, FnDecl):
+            add_named_definition(node, "function")
+            visit_declarations(node.body)
+            return
+        if isinstance(node, ClassDecl):
+            add_named_definition(node, "class")
+            for method in node.methods:
+                add_named_definition(method, "method")
+                visit_declarations(method.body)
+            return
+        if isinstance(node, DestructureStmt):
+            add_destructure_definitions(node)
+        if isinstance(node, (list, tuple)):
+            for child in node:
+                visit_declarations(child)
+            return
+        if isinstance(node, Node):
+            for child in vars(node).values():
+                visit_declarations(child)
+
     for stmt in program.statements:
-        if isinstance(stmt, FnDecl) and stmt.name:
-            c = getattr(stmt, "name_col", 0)
-            if c:
-                c = max(0, c - 1)
-            else:
-                c = col_of(stmt.line, stmt.name)
-            defs.append((stmt.name, "function", stmt.line - 1, c))
-        if isinstance(stmt, ClassDecl):
-            c = getattr(stmt, "name_col", 0)
-            if c:
-                c = max(0, c - 1)
-            else:
-                c = col_of(stmt.line, stmt.name)
-            defs.append((stmt.name, "class", stmt.line - 1, c))
         if isinstance(stmt, LetStmt) and stmt.name:
-            c = getattr(stmt, "name_col", 0)
-            if c:
-                c = max(0, c - 1)
-            else:
-                c = col_of(stmt.line, stmt.name)
-            defs.append((stmt.name, "variable", stmt.line - 1, c))
-    for stmt in program.statements:
-        if isinstance(stmt, ClassDecl):
-            for m in stmt.methods:
-                if m.name:
-                    c = getattr(m, "name_col", 0)
-                    if c:
-                        c = max(0, c - 1)
-                    else:
-                        c = col_of(m.line, m.name)
-                    defs.append((m.name, "method", m.line - 1, c))
-    # also FnDecl with type annotations etc. already covered
-    # DestructureStmt
-    for stmt in program.statements:
-        if isinstance(stmt, DestructureStmt):
-            for name in stmt.names:
-                # best effort: col 0
-                defs.append((name, "variable", stmt.line - 1, 0))
+            add_named_definition(stmt, "variable")
+        visit_declarations(stmt)
     return defs
 
 def collect_identifiers(program):
@@ -228,21 +307,393 @@ def handle_initialize(params):
         "serverInfo": {"name": "renixx-lsp", "version": "1.0.0"},
     }
 
+def _program_for_features(uri):
+    program = asts.get(uri)
+    if program is not None:
+        return program
+    text = documents.get(uri, "")
+    try:
+        return parse(text)
+    except Exception:
+        pass
+    for end in range(len(text), 0, -1):
+        if text[end - 1] != "\n":
+            continue
+        try:
+            return parse(text[:end])
+        except Exception:
+            continue
+    return None
+
+def _identifier_at_position(text, line, utf16_col):
+    lines = text.splitlines()
+    if line < 0 or line >= len(lines):
+        return None
+    line_text = lines[line]
+    py_col = utf16_col_to_py(line_text, max(0, utf16_col))
+    try:
+        tokens = tokenize(text)
+    except Exception:
+        return None
+    for token in tokens:
+        if token.line != line + 1 or token.type not in ("IDENT", "KEYWORD"):
+            continue
+        start = max(0, token.col - 1)
+        end = start + len(token.value)
+        if start <= py_col <= end:
+            return token.value, start, end
+    return None
+
+def _node_position(node, text):
+    lines = text.splitlines()
+    line = max(0, getattr(node, "line", 1) - 1)
+    if line >= len(lines):
+        return line, 0
+    col = getattr(node, "name_col", 0)
+    return line, max(0, col - 1) if col else 0
+
+def _function_declarations(program):
+    declarations = []
+
+    def visit(node):
+        if node is None:
+            return
+        if isinstance(node, FnDecl):
+            declarations.append(node)
+        if isinstance(node, (list, tuple)):
+            for child in node:
+                visit(child)
+        elif isinstance(node, Node):
+            for child in vars(node).values():
+                visit(child)
+
+    visit(program)
+    return declarations
+
+def _function_range(fn, text, tokens, brace_pairs):
+    if not fn.name:
+        return None
+    name_col = max(0, getattr(fn, "name_col", 0) - 1)
+    name_token = None
+    name_index = None
+    for index, token in enumerate(tokens):
+        if (token.type == "IDENT" and token.value == fn.name
+                and token.line == fn.line and max(0, token.col - 1) == name_col):
+            name_token = token
+            name_index = index
+            break
+    if name_index is None:
+        return None
+    open_paren = next(
+        (i for i in range(name_index + 1, len(tokens)) if tokens[i].type == "LPAREN"),
+        None,
+    )
+    if open_paren is None:
+        return None
+    depth = 0
+    close_paren = None
+    for index in range(open_paren, len(tokens)):
+        if tokens[index].type == "LPAREN":
+            depth += 1
+        elif tokens[index].type == "RPAREN":
+            depth -= 1
+            if depth == 0:
+                close_paren = index
+                break
+    if close_paren is None:
+        return None
+    open_brace = next(
+        (i for i in range(close_paren + 1, len(tokens)) if tokens[i].type == "LBRACE"),
+        None,
+    )
+    if open_brace not in brace_pairs:
+        return None
+    lines = text.splitlines(keepends=True)
+
+    def offset(token):
+        return sum(len(value) for value in lines[:token.line - 1]) + max(0, token.col - 1)
+
+    start = offset(name_token)
+    opening = offset(tokens[open_brace])
+    closing = offset(tokens[brace_pairs[open_brace]])
+    return start, opening, closing
+
+def _function_signature(fn):
+    params = []
+    for param in fn.params:
+        name = param[0]
+        default = param[1] if len(param) > 1 else None
+        is_rest = param[2] if len(param) > 2 else False
+        annotation = param[3] if len(param) > 3 else None
+        label = ("..." if is_rest else "") + name
+        if annotation:
+            label += ": " + annotation
+        if default is not None:
+            label += " = ..."
+        params.append(label)
+    signature = "fn %s(%s)" % (fn.name, ", ".join(params))
+    if fn.return_type:
+        signature += " -> " + fn.return_type
+    return signature
+
+def _visible_symbols(uri, program, line, utf16_col):
+    text = documents.get(uri, "")
+    lines = text.splitlines()
+    if line < 0 or line >= len(lines):
+        return {}
+    py_col = utf16_col_to_py(lines[line], max(0, utf16_col))
+    offset = sum(len(value) for value in text.splitlines(keepends=True)[:line]) + py_col
+    try:
+        tokens = tokenize(text)
+    except Exception:
+        tokens = []
+    brace_stack = []
+    brace_pairs = {}
+    for index, token in enumerate(tokens):
+        if token.type == "LBRACE":
+            brace_stack.append(index)
+        elif token.type == "RBRACE" and brace_stack:
+            brace_pairs[brace_stack.pop()] = index
+    source_lines = text.splitlines(keepends=True)
+
+    def token_offset(token):
+        return sum(len(value) for value in source_lines[:token.line - 1]) + max(0, token.col - 1)
+
+    brace_ranges = [
+        (
+            token_offset(tokens[opening]),
+            token_offset(tokens[closing]),
+            tokens[opening].line - 1,
+        )
+        for opening, closing in brace_pairs.items()
+    ]
+
+    functions = _function_declarations(program)
+    ranges = []
+    for fn in functions:
+        fn_range = _function_range(fn, text, tokens, brace_pairs)
+        if fn_range and fn_range[0] <= offset <= fn_range[2]:
+            ranges.append((fn_range[2] - fn_range[0], fn, fn_range))
+    ranges.sort(reverse=True, key=lambda item: item[0])
+
+    checker = TypeChecker(text)
+    try:
+        checker.check(program)
+        from .typechecker import Scope
+        scope = Scope()
+    except Exception:
+        checker = None
+        from .typechecker import Scope
+        scope = Scope()
+    symbols = {}
+
+    if checker is not None:
+        for name in checker.fn_types:
+            scope.define(name, "function", "function")
+            declaration = next((fn for fn in functions if fn.name == name), None)
+            symbols[name] = {"kind": "function", "type": "function", "declaration": declaration}
+        for name in checker.class_types:
+            scope.define(name, "class", "class")
+            symbols[name] = {"kind": "class", "type": "class", "declaration": None}
+    for name in BUILTINS:
+        scope.define(name, "any", "builtin")
+        symbols.setdefault(name, {"kind": "builtin", "type": "any", "declaration": None})
+
+    def before_cursor(node):
+        decl_line, decl_col = _node_position(node, text)
+        return (decl_line, decl_col) <= (line, py_col)
+
+    def define_statement(stmt, current_scope):
+        if isinstance(stmt, LetStmt) and stmt.name and before_cursor(stmt):
+            annotation = stmt.type_annot
+            try:
+                inferred = checker._infer_type(stmt.value, current_scope) if checker else None
+            except Exception:
+                inferred = None
+            symbol_type = annotation or (inferred if inferred not in (None, "unknown") else None)
+            current_scope.define(stmt.name, symbol_type or "unknown", "variable")
+            symbols[stmt.name] = {"kind": "variable", "type": symbol_type, "declaration": stmt}
+        elif isinstance(stmt, DestructureStmt) and before_cursor(stmt):
+            for name in stmt.names:
+                current_scope.define(name, "unknown", "variable")
+                symbols[name] = {"kind": "variable", "type": None, "declaration": stmt}
+        elif isinstance(stmt, FnDecl) and stmt.name and before_cursor(stmt):
+            current_scope.define(stmt.name, "function", "function")
+            symbols[stmt.name] = {"kind": "function", "type": "function", "declaration": stmt}
+        elif isinstance(stmt, ClassDecl) and stmt.name and before_cursor(stmt):
+            current_scope.define(stmt.name, "class", "class")
+            symbols[stmt.name] = {"kind": "class", "type": "class", "declaration": stmt}
+
+    for stmt in program.statements:
+        if isinstance(stmt, (LetStmt, DestructureStmt, FnDecl, ClassDecl)):
+            define_statement(stmt, scope)
+
+    for _, fn, _ in ranges:
+        child_scope = Scope(scope)
+        for param in fn.params:
+            name = param[0]
+            annotation = param[3] if len(param) > 3 else None
+            default = param[1] if len(param) > 1 else None
+            try:
+                inferred = checker._infer_type(default, scope) if checker and default is not None else None
+            except Exception:
+                inferred = None
+            symbol_type = annotation or (inferred if inferred not in (None, "unknown") else None)
+            child_scope.define(name, symbol_type or "unknown", "variable")
+            symbols[name] = {"kind": "variable", "type": symbol_type, "declaration": fn}
+        for stmt in fn.body.statements:
+            if isinstance(stmt, (LetStmt, DestructureStmt, FnDecl, ClassDecl)):
+                define_statement(stmt, child_scope)
+        scope = child_scope
+
+    nested_declarations = []
+    for_statements = []
+    try_statements = []
+    for_init_ids = set()
+
+    def collect_nested_declarations(node):
+        if node is None:
+            return
+        if isinstance(node, LetStmt):
+            nested_declarations.append(node)
+        if isinstance(node, ForStmt):
+            for_statements.append(node)
+            if isinstance(node.init, LetStmt):
+                for_init_ids.add(id(node.init))
+        if isinstance(node, TryStmt):
+            try_statements.append(node)
+        if isinstance(node, (list, tuple)):
+            for child in node:
+                collect_nested_declarations(child)
+        elif isinstance(node, Node):
+            for child in vars(node).values():
+                collect_nested_declarations(child)
+
+    collect_nested_declarations(program)
+    nested_declarations.sort(key=lambda stmt: _node_position(stmt, text))
+    for stmt in nested_declarations:
+        if not stmt.name or id(stmt) in for_init_ids or not before_cursor(stmt):
+            continue
+        decl_line, decl_col = _node_position(stmt, text)
+        decl_offset = sum(
+            len(value) for value in source_lines[:decl_line]
+        ) + decl_col
+        containing_ranges = [
+            pair for pair in brace_ranges if pair[0] < decl_offset < pair[1]
+        ]
+        if not containing_ranges:
+            continue
+        scope_range = min(containing_ranges, key=lambda pair: pair[1] - pair[0])
+        if not scope_range[0] < offset < scope_range[1]:
+            continue
+        annotation = stmt.type_annot
+        try:
+            inferred = checker._infer_type(stmt.value, scope) if checker else None
+        except Exception:
+            inferred = None
+        symbol_type = annotation or (inferred if inferred not in (None, "unknown") else None)
+        scope.define(stmt.name, symbol_type or "unknown", "variable")
+        symbols[stmt.name] = {"kind": "variable", "type": symbol_type, "declaration": stmt}
+
+    def body_range(block, after_offset=0):
+        candidates = [
+            (start, end) for start, end, open_line in brace_ranges
+            if open_line == block.line - 1
+            and start >= after_offset
+            and start < offset < end
+        ]
+        return min(candidates, key=lambda pair: pair[1] - pair[0]) if candidates else None
+
+    for loop in for_statements:
+        loop_name = loop.var
+        loop_name_offset = 0
+        if loop_name:
+            for index, token in enumerate(tokens[:-1]):
+                if (token.type == "KEYWORD" and token.value == "for"
+                        and token.line == loop.line
+                        and tokens[index + 1].type == "IDENT"
+                        and tokens[index + 1].value == loop_name):
+                    loop_name_offset = token_offset(tokens[index + 1])
+                    break
+        else:
+            loop_name = loop.init.name if isinstance(loop.init, LetStmt) else None
+            if loop_name:
+                loop_line, loop_col = _node_position(loop.init, text)
+                loop_name_offset = sum(
+                    len(value) for value in source_lines[:loop_line]
+                ) + loop_col
+        active_body = body_range(loop.body, loop_name_offset)
+        if not loop_name or active_body is None:
+            continue
+        symbol_type = None
+        if loop.var and checker:
+            try:
+                iterable_type = checker._infer_type(loop.iterable, scope)
+                from .typechecker import parse_type
+                parsed_type = parse_type(iterable_type)
+                if parsed_type[0] == "list" and parsed_type[1]:
+                    symbol_type = parsed_type[1][0]
+            except Exception:
+                pass
+        elif isinstance(loop.init, LetStmt):
+            symbol_type = loop.init.type_annot
+            if symbol_type is None and checker:
+                try:
+                    symbol_type = checker._infer_type(loop.init.value, scope)
+                except Exception:
+                    symbol_type = None
+            if symbol_type == "unknown":
+                symbol_type = None
+        scope.define(loop_name, symbol_type or "unknown", "variable")
+        symbols[loop_name] = {"kind": "variable", "type": symbol_type, "declaration": loop}
+
+    for try_stmt in try_statements:
+        if not try_stmt.catch_var or try_stmt.catch_block is None:
+            continue
+        catch_offset = None
+        for index, token in enumerate(tokens):
+            if token.type != "KEYWORD" or token.value != "catch":
+                continue
+            catch_name = None
+            for candidate in tokens[index + 1:index + 5]:
+                if candidate.type == "IDENT" and candidate.value == try_stmt.catch_var:
+                    catch_name = candidate
+                if candidate.type == "LBRACE":
+                    if (catch_name is not None
+                            and candidate.line == try_stmt.catch_block.line):
+                        catch_offset = token_offset(catch_name)
+                    break
+            if catch_offset is not None:
+                break
+        if catch_offset is None or body_range(try_stmt.catch_block, catch_offset) is None:
+            continue
+        scope.define(try_stmt.catch_var, "any", "variable")
+        symbols[try_stmt.catch_var] = {
+            "kind": "variable",
+            "type": "any",
+            "declaration": try_stmt,
+        }
+    return symbols
+
 def handle_completion(params):
     uri = params["textDocument"]["uri"]
-    program = asts.get(uri, None)
+    program = _program_for_features(uri)
+    pos = params.get("position", {})
+    symbols = _visible_symbols(uri, program, pos.get("line", 0), pos.get("character", 0)) if program else {}
     items = []
     for kw in KEYWORDS:
         items.append({"label": kw, "kind": 14, "detail": "keyword"})
     for b in BUILTINS:
         items.append({"label": b, "kind": 3, "detail": "builtin"})
-    # defined names
-    for name, kind, dline, dcol in find_definitions(program, documents.get(uri, "")):
-        kind_num = 12 if kind == "function" else (5 if kind == "class" else 13 if kind == "variable" else 6)
-        items.append({"label": name, "kind": kind_num, "detail": kind})
-    for name in collect_identifiers(program):
-        if name and name not in ("this",):
-            items.append({"label": name, "kind": 6, "detail": "identifier"})
+    for name, symbol in symbols.items():
+        kind = symbol["kind"]
+        kind_num = 12 if kind == "function" else (5 if kind == "class" else 13 if kind == "variable" else 3)
+        detail = kind
+        if kind == "variable" and symbol.get("type"):
+            detail += ": " + symbol["type"]
+        elif kind == "function" and symbol.get("declaration"):
+            detail = _function_signature(symbol["declaration"])
+        items.append({"label": name, "kind": kind_num, "detail": detail})
     # dedupe
     seen = set()
     out = []
@@ -258,8 +709,10 @@ def handle_signature_help(params):
     pos = params["position"]
     text = documents.get(uri, "")
     lines = text.splitlines()
-    line = pos["line"]
-    ch = pos["character"]
+    line = pos.get("line", 0)
+    ch = pos.get("character", 0)
+    if line < 0 or line > len(lines):
+        return None
     # find the function name before the last unclosed '('
     # gather text up to cursor
     prefix = ""
@@ -292,24 +745,16 @@ def handle_signature_help(params):
     name = prefix[j+1:end]
     if not name:
         return None
-    program = asts.get(uri, None)
-    # find function def
-    params_list = None
-    from .ast import FnDecl, ClassDecl
-    def find_fn(prog, target):
-        if prog is None:
-            return None
-        for st in prog.statements:
-            if isinstance(st, FnDecl) and st.name == target:
-                return st.params
-            if isinstance(st, ClassDecl):
-                for m in st.methods:
-                    if m.name == target:
-                        return m.params
+    program = _program_for_features(uri)
+    symbols = _visible_symbols(uri, program, line, pos.get("character", 0)) if program else {}
+    symbol = symbols.get(name)
+    fn = symbol.get("declaration") if symbol else None
+    if fn is None:
+        candidates = [candidate for candidate in _function_declarations(program) if candidate.name == name] if program else []
+        fn = candidates[0] if len(candidates) == 1 else None
+    if fn is None:
         return None
-    params_list = find_fn(program, name)
-    if params_list is None:
-        return None
+    params_list = fn.params
     # count active parameter (commas at depth 0 after '(')
     after = prefix[idx+1:]
     depth2 = 0
@@ -332,8 +777,9 @@ def handle_signature_help(params):
         if default is not None:
             label += " = ..."
         sig_params.append({"label": label})
+    signature_label = _function_signature(fn)
     return {
-        "signatures": [{"label": "%s(%s)" % (name, ", ".join(pp["label"] for pp in sig_params)),
+        "signatures": [{"label": signature_label,
                         "parameters": sig_params}],
         "activeSignature": 0,
         "activeParameter": min(commas, len(sig_params) - 1) if sig_params else 0,
@@ -532,25 +978,18 @@ def handle_hover(params):
     uri = params["textDocument"]["uri"]
     pos = params["position"]
     text = documents.get(uri, "")
-    lines = text.splitlines()
-    line = pos["line"]
-    ch = pos["character"]
-    word = ""
-    if line < len(lines):
-        s = lines[line]
-        ch = utf16_col_to_py(s, ch)
-        if ch > len(s):
-            ch = len(s)
-        start = ch
-        while start > 0 and (s[start-1].isalnum() or s[start-1] == "_"):
-            start -= 1
-        end = ch
-        while end < len(s) and (s[end].isalnum() or s[end] == "_"):
-            end += 1
-        word = s[start:end]
-    if not word:
+    line = pos.get("line", 0)
+    token = _identifier_at_position(text, line, pos.get("character", 0))
+    if token is None:
         return None
-    # documentation
+    word, start, end = token
+    program = _program_for_features(uri)
+    symbols = _visible_symbols(uri, program, line, pos.get("character", 0)) if program else {}
+    symbol = symbols.get(word)
+    if symbol is None and program is not None:
+        candidates = [fn for fn in _function_declarations(program) if fn.name == word]
+        if len(candidates) == 1:
+            symbol = {"kind": "function", "declaration": candidates[0], "type": "function"}
     docs = {
         "print": "print(...): print values to stdout",
         "len": "len(x): length of string/list/dict",
@@ -558,9 +997,32 @@ def handle_hover(params):
         "math": "math module: sqrt, sin, cos, pi, ...",
         "json": "json module: parse, stringify",
     }
-    info = docs.get(word, word)
+    if symbol:
+        kind = symbol["kind"]
+        declaration = symbol.get("declaration")
+        if kind == "function" and declaration:
+            info = _function_signature(declaration)
+        elif kind == "function":
+            info = "function %s" % word
+        elif kind == "class":
+            info = "class %s" % word
+        elif kind == "variable" and symbol.get("type"):
+            info = "%s: %s" % (word, symbol["type"])
+        elif kind == "builtin":
+            info = docs.get(word, "built-in %s" % word)
+        else:
+            info = kind + " " + word
+    else:
+        info = docs.get(word)
+    if info is None:
+        return None
+    line_text = text.splitlines()[line]
     return {
-        "contents": {"kind": "markdown", "value": "```\n%s\n```\n%s" % (word, info)},
+        "contents": {"kind": "markdown", "value": "```\n%s\n```" % info},
+        "range": {
+            "start": {"line": line, "character": py_col_to_utf16(line_text, start)},
+            "end": {"line": line, "character": py_col_to_utf16(line_text, end)},
+        },
     }
 
 def handle_definition(params):

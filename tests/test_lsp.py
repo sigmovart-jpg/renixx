@@ -6,6 +6,7 @@ import sys
 import threading
 import time
 import queue
+import pytest
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 SRC = os.path.join(ROOT, "src")
@@ -208,6 +209,162 @@ def test_signature_help_no_function():
     # accept None or result without signatures
     r = m.get("result")
     assert r is None or (isinstance(r, dict) and (r.get("signatures") in (None, [])))
+
+def test_hover_shows_inferred_variable_type_and_utf16_range():
+    code = 'let text = "😀"; let count = 1; print(count)\n'
+    line = code.splitlines()[0]
+    target_col = line.rindex("count")
+    target_cursor = target_col + 2
+    target_utf16_cursor = len(line[:target_cursor].encode("utf-16-le")) // 2
+    msgs, err = run_session([
+        init_msg(),
+        open_msg("file:///hover-type.rn", code),
+        {"jsonrpc": "2.0", "id": 2, "method": "textDocument/hover",
+         "params": {"textDocument": {"uri": "file:///hover-type.rn"},
+                    "position": {"line": 0, "character": target_utf16_cursor}}},
+    ])
+    result = find(msgs, id=2)["result"]
+    assert "count: int" in result["contents"]["value"]
+    utf16_col = len(line[:target_col].encode("utf-16-le")) // 2
+    assert result["range"]["start"] == {"line": 0, "character": utf16_col}
+    assert result["range"]["end"] == {"line": 0, "character": utf16_col + len("count")}
+
+
+def test_hover_shows_parameterized_variable_and_function_signatures():
+    code = (
+        "let values: list[dict[string, int]] = []\n"
+        "fn lookup(items: list[dict[string, int]]) -> list[dict[string, int]] { return items }\n"
+        "print(values)\n"
+        "lookup([])\n"
+    )
+    msgs, err = run_session([
+        init_msg(),
+        open_msg("file:///hover-generics.rn", code),
+        {"jsonrpc": "2.0", "id": 2, "method": "textDocument/hover",
+         "params": {"textDocument": {"uri": "file:///hover-generics.rn"},
+                    "position": {"line": 2, "character": 7}},
+        },
+        {"jsonrpc": "2.0", "id": 3, "method": "textDocument/hover",
+         "params": {"textDocument": {"uri": "file:///hover-generics.rn"},
+                    "position": {"line": 3, "character": 2}},
+        },
+    ])
+    variable = find(msgs, id=2)["result"]["contents"]["value"]
+    function = find(msgs, id=3)["result"]["contents"]["value"]
+    assert "values: list[dict[string, int]]" in variable
+    expected_signature = (
+        "fn lookup(items: list[dict[string, int]]) -> list[dict[string, int]]"
+    )
+    assert expected_signature in function
+
+
+def test_signature_help_includes_parameterized_types_and_active_parameter():
+    code = (
+        "fn consume(items: list[dict[string, int]], count: int) -> bool { return true }\n"
+        'let marker = "😀"; consume([], )\n'
+    )
+    msgs, err = run_session([
+        init_msg(),
+        open_msg("file:///signature-generics.rn", code),
+        {"jsonrpc": "2.0", "id": 2, "method": "textDocument/signatureHelp",
+         "params": {"textDocument": {"uri": "file:///signature-generics.rn"},
+                    "position": {"line": 1, "character": (
+                        len('let marker = "😀"; consume([], '.encode("utf-16-le")) // 2
+                    )}}},
+    ])
+    result = find(msgs, id=2)["result"]
+    signature = result["signatures"][0]
+    assert signature["label"] == (
+        "fn consume(items: list[dict[string, int]], count: int) -> bool"
+    )
+    assert signature["parameters"][0]["label"] == "items: list[dict[string, int]]"
+    assert signature["parameters"][1]["label"] == "count: int"
+    assert result["activeParameter"] == 1
+
+
+def test_completion_contains_only_symbols_visible_in_current_function_scope():
+    code = (
+        "let global_value = 1\n"
+        "fn outer(arg: string) {\n"
+        "  let local_value = 2\n"
+        "  let items: list[int] = []\n"
+        "  for item in items {\n"
+        "    if true {\n"
+        "      let branch_value: list[int] = []\n"
+        "      print()\n"
+        "    }\n"
+        "  }\n"
+        "  try {\n"
+        "    print()\n"
+        "  } catch problem {\n"
+        "    print()\n"
+        "  }\n"
+        "}\n"
+        "fn other() { let hidden_value = 3 }\n"
+    )
+    msgs, err = run_session([
+        init_msg(),
+        open_msg("file:///completion-scope.rn", code),
+        {"jsonrpc": "2.0", "id": 2, "method": "textDocument/completion",
+         "params": {"textDocument": {"uri": "file:///completion-scope.rn"},
+                    "position": {"line": 7, "character": 12}}},
+        {"jsonrpc": "2.0", "id": 3, "method": "textDocument/completion",
+         "params": {"textDocument": {"uri": "file:///completion-scope.rn"},
+                    "position": {"line": 13, "character": 10}}},
+    ])
+    items = find(msgs, id=2)["result"]
+    labels = {item["label"] for item in items}
+    assert {
+        "global_value", "outer", "arg", "local_value", "items", "item",
+        "branch_value", "print",
+    } <= labels
+    assert "hidden_value" not in labels
+    local_item = next(item for item in items if item["label"] == "local_value")
+    assert local_item["detail"] == "variable: int"
+    branch_item = next(item for item in items if item["label"] == "branch_value")
+    assert branch_item["detail"] == "variable: list[int]"
+    loop_item = next(item for item in items if item["label"] == "item")
+    assert loop_item["detail"] == "variable: int"
+    catch_items = find(msgs, id=3)["result"]
+    catch_labels = {item["label"] for item in catch_items}
+    assert {"global_value", "outer", "arg", "local_value", "items", "problem"} <= catch_labels
+    assert "item" not in catch_labels
+    assert "branch_value" not in catch_labels
+
+
+def test_signature_help_recovers_prior_declarations_before_incomplete_call():
+    code = "fn identity(value: list[int]) -> list[int] { return value }\nidentity("
+    msgs, err = run_session([
+        init_msg(),
+        open_msg("file:///signature-incomplete.rn", code),
+        {"jsonrpc": "2.0", "id": 2, "method": "textDocument/signatureHelp",
+         "params": {"textDocument": {"uri": "file:///signature-incomplete.rn"},
+                    "position": {"line": 1, "character": len("identity(")}}},
+        {"jsonrpc": "2.0", "id": 3, "method": "textDocument/completion",
+         "params": {"textDocument": {"uri": "file:///signature-incomplete.rn"},
+                    "position": {"line": 1, "character": len("identity(")}}},
+    ])
+    signature = find(msgs, id=2)["result"]
+    assert signature["signatures"][0]["label"] == "fn identity(value: list[int]) -> list[int]"
+    assert signature["activeParameter"] == 0
+    assert isinstance(find(msgs, id=3)["result"], list)
+
+
+def test_hover_and_completion_do_not_crash_on_syntax_errors():
+    code = "let value = \n"
+    msgs, err = run_session([
+        init_msg(),
+        open_msg("file:///features-invalid.rn", code),
+        {"jsonrpc": "2.0", "id": 2, "method": "textDocument/hover",
+         "params": {"textDocument": {"uri": "file:///features-invalid.rn"},
+                    "position": {"line": 0, "character": 4}}},
+        {"jsonrpc": "2.0", "id": 3, "method": "textDocument/completion",
+         "params": {"textDocument": {"uri": "file:///features-invalid.rn"},
+                    "position": {"line": 0, "character": 4}}},
+    ])
+    assert find(msgs, id=2)["result"] is None
+    assert isinstance(find(msgs, id=3)["result"], list)
+    assert err == ""
 
 
 def test_definition():
@@ -514,6 +671,203 @@ def test_diagnostics_type_error():
     assert any("Type error" in d["message"] for d in diags)
 
 
+def test_lsp_type_checker_var_mismatch():
+    # Type checker: variable type mismatch
+    code = 'let x: int = "hello"\n'
+    msgs, err = run_session([init_msg(), open_msg("file:///tc1.rn", code)])
+    notifs = [m for m in msgs if m.get("method") == "textDocument/publishDiagnostics"]
+    assert notifs
+    diags = notifs[-1]["params"]["diagnostics"]
+    assert any("Type error" in d["message"] for d in diags)
+
+
+def test_lsp_type_checker_func_arg():
+    # Type checker: function argument type mismatch
+    code = 'fn add(a: int, b: int) -> int { return a + b }\nlet y = add(1, "a")\n'
+    msgs, err = run_session([init_msg(), open_msg("file:///tc2.rn", code)])
+    notifs = [m for m in msgs if m.get("method") == "textDocument/publishDiagnostics"]
+    assert notifs
+    diags = notifs[-1]["params"]["diagnostics"]
+    assert any("Type error" in d["message"] for d in diags)
+
+
+def test_lsp_type_checker_func_return():
+    # Type checker: function return type mismatch
+    code = 'fn f() -> int { return "hello" }\n'
+    msgs, err = run_session([init_msg(), open_msg("file:///tc3.rn", code)])
+    notifs = [m for m in msgs if m.get("method") == "textDocument/publishDiagnostics"]
+    assert notifs
+    diags = notifs[-1]["params"]["diagnostics"]
+    assert any("Type error" in d["message"] for d in diags)
+
+
+def test_lsp_type_checker_valid_code():
+    # Type checker: valid code produces no type errors
+    code = 'let x: int = 5\nfn add(a: int, b: int) -> int { return a + b }\nlet y: int = add(1, 2)\n'
+    msgs, err = run_session([init_msg(), open_msg("file:///tc4.rn", code)])
+    notifs = [m for m in msgs if m.get("method") == "textDocument/publishDiagnostics"]
+    assert notifs
+    diags = notifs[-1]["params"]["diagnostics"]
+    # No type errors (may have no diagnostics at all)
+    type_errors = [d for d in diags if "Type error" in d["message"]]
+    assert type_errors == [], "unexpected type errors: %r" % type_errors
+
+
+def test_lsp_parameterized_types_accept_valid_values():
+    code = (
+        "let items: list[int] = [1, 2]\n"
+        'let counts: dict[string, int] = {"a": 1}\n'
+        'let nested: list[dict[string, int]] = [{"a": 1}]\n'
+    )
+    msgs, err = run_session([
+        init_msg(),
+        open_msg("file:///generic-valid.rn", code),
+    ])
+    notifs = [m for m in msgs if m.get("method") == "textDocument/publishDiagnostics"]
+
+    assert notifs
+    assert notifs[-1]["params"]["diagnostics"] == []
+
+
+def test_lsp_parameterized_function_annotations_do_not_report_unknown_type():
+    code = (
+        "fn identity(items: list[int]) -> list[int] {\n"
+        "  return items\n"
+        "}\n"
+    )
+    msgs, err = run_session([
+        init_msg(),
+        open_msg("file:///generic-function.rn", code),
+    ])
+    notifs = [m for m in msgs if m.get("method") == "textDocument/publishDiagnostics"]
+
+    assert notifs
+    assert notifs[-1]["params"]["diagnostics"] == []
+
+
+@pytest.mark.parametrize(
+    ("uri", "code", "expected_col", "expected_message"),
+    [
+        (
+            "file:///generic-list-mismatch.rn",
+            'let data: list[int] = "bad"\n',
+            4,
+            "Type error: expected list[int], got string",
+        ),
+        (
+            "file:///generic-dict-mismatch.rn",
+            'let data: dict[string, int] = "bad"\n',
+            4,
+            "Type error: expected dict[string, int], got string",
+        ),
+        (
+            "file:///generic-dict-element-mismatch.rn",
+            'let data: dict[string, int] = {"a": "bad"}\n',
+            36,
+            "Type error: expected int, got string",
+        ),
+        (
+            "file:///generic-nested-mismatch.rn",
+            'let data: list[dict[string, int]] = "bad"\n',
+            4,
+            "Type error: expected list[dict[string, int]], got string",
+        ),
+        (
+            "file:///generic-nested-element-mismatch.rn",
+            'let data: list[dict[string, int]] = [{"a": "bad"}]\n',
+            43,
+            "Type error: expected int, got string",
+        ),
+    ],
+)
+def test_lsp_parameterized_type_errors_have_precise_ranges(
+    uri, code, expected_col, expected_message
+):
+    msgs, err = run_session([init_msg(), open_msg(uri, code)])
+    notifs = [m for m in msgs if m.get("method") == "textDocument/publishDiagnostics"]
+    assert notifs
+    diags = notifs[-1]["params"]["diagnostics"]
+    matching = [d for d in diags if d["message"] == expected_message]
+
+    assert len(matching) == 1
+    assert matching[0]["range"]["start"] == {"line": 0, "character": expected_col}
+    assert matching[0]["range"]["end"]["character"] > matching[0]["range"]["start"]["character"]
+
+def test_lsp_parameterized_diagnostic_range_uses_utf16_after_emoji():
+    code = 'let s = "😀"; let data: list[int] = "bad"\n'
+    data_col = code.index("data")
+    msgs, err = run_session([
+        init_msg(),
+        open_msg("file:///generic-emoji.rn", code),
+    ])
+    notifs = [m for m in msgs if m.get("method") == "textDocument/publishDiagnostics"]
+    assert notifs
+    diags = notifs[-1]["params"]["diagnostics"]
+    mismatch = [
+        d for d in diags
+        if d["message"] == "Type error: expected list[int], got string"
+    ]
+
+    assert len(mismatch) == 1
+    assert mismatch[0]["range"]["start"] == {
+        "line": 0,
+        "character": data_col + 1,
+    }
+    assert mismatch[0]["range"]["end"] == {
+        "line": 0,
+        "character": data_col + 1 + len("data"),
+    }
+
+
+def test_lsp_type_checker_no_crash_on_bad_code():
+    # Type checker should not crash LSP on malformed input
+    code = 'let x: int = \n'
+    msgs, err = run_session([init_msg(), open_msg("file:///tc5.rn", code)])
+    notifs = [m for m in msgs if m.get("method") == "textDocument/publishDiagnostics"]
+    assert notifs  # should still publish (syntax error)
+
+
+def test_lsp_dedup_same_message_different_cols():
+    # Regression: same message on same line with different columns should NOT be deduped.
+    code = "let y = x + x\n"
+    msgs, err = run_session([init_msg(), open_msg("file:///dedup1.rn", code)])
+    notifs = [m for m in msgs if m.get("method") == "textDocument/publishDiagnostics"]
+    assert notifs
+    diags = notifs[-1]["params"]["diagnostics"]
+    assert len(diags) == 2, "expected 2 diagnostics, got %d" % len(diags)
+
+
+def test_lsp_dedup_cross_source():
+    # Regression: semantic + typechecker same message on same line should be deduped.
+    code = 'let x: int = "hi"\n'
+    msgs, err = run_session([init_msg(), open_msg("file:///dedup2.rn", code)])
+    notifs = [m for m in msgs if m.get("method") == "textDocument/publishDiagnostics"]
+    assert notifs
+    diags = notifs[-1]["params"]["diagnostics"]
+    type_errors = [d for d in diags if "Type error" in d["message"]]
+    assert len(type_errors) == 1, "expected 1 type error, got %d" % len(type_errors)
+
+
+def test_lsp_dedup_different_lines_preserved():
+    # Regression: different errors on different lines should be preserved.
+    code = 'let x: int = "hi"\nlet y: float = "bye"\n'
+    msgs, err = run_session([init_msg(), open_msg("file:///dedup3.rn", code)])
+    notifs = [m for m in msgs if m.get("method") == "textDocument/publishDiagnostics"]
+    assert notifs
+    diags = notifs[-1]["params"]["diagnostics"]
+    assert len(diags) == 2, "expected 2 diagnostics, got %d" % len(diags)
+
+
+def test_lsp_type_checker_exception_no_hide():
+    # Type checker exception should not hide semantic diagnostics.
+    code = "let z = unknown_var\n"
+    msgs, err = run_session([init_msg(), open_msg("file:///dedup4.rn", code)])
+    notifs = [m for m in msgs if m.get("method") == "textDocument/publishDiagnostics"]
+    assert notifs
+    diags = notifs[-1]["params"]["diagnostics"]
+    assert any("Undefined variable" in d["message"] for d in diags)
+
+
 def test_diagnostic_column_accuracy():
     # Regression test: two identical identifiers on one line should produce
     # diagnostics at their respective columns, not both at the first occurrence.
@@ -582,7 +936,8 @@ def test_diagnostic_column_const_type_error():
     diags = notifs[-1]["params"]["diagnostics"]
     assert any("Type error" in d["message"] for d in diags)
     te = [d for d in diags if "Type error" in d["message"]][0]
-    assert te["range"]["start"]["character"] == 9
+    # Type checker points to variable name (col 6), not type annotation (col 9)
+    assert te["range"]["start"]["character"] == 6
 
 
 def test_diagnostic_column_const_redeclaration():
@@ -703,3 +1058,101 @@ def test_class_definition_not_in_string():
     assert m is not None and m.get("result") is not None
     # Foo class should be at col 21, not col 9 (inside string)
     assert m["result"]["range"]["start"]["character"] == 21
+
+
+def test_lsp_dedup_same_message_at_distinct_locations():
+    code = "fn f(x: Weird) {} let y: Weird = 1\n"
+    msgs, err = run_session([
+        init_msg(),
+        open_msg("file:///dedup-locations.rn", code),
+    ])
+    notifs = [m for m in msgs if m.get("method") == "textDocument/publishDiagnostics"]
+    assert notifs
+    unknown_types = [
+        d for d in notifs[-1]["params"]["diagnostics"]
+        if d["message"] == "Unknown type 'Weird'"
+    ]
+
+    assert len(unknown_types) == 2
+    assert sorted(d["range"]["start"]["character"] for d in unknown_types) == [8, 25]
+
+
+def test_lsp_dedup_identical_unknown_type_from_both_analyzers():
+    code = "fn f(x: Weird) {}\n"
+    msgs, err = run_session([
+        init_msg(),
+        open_msg("file:///dedup-identical.rn", code),
+    ])
+    notifs = [m for m in msgs if m.get("method") == "textDocument/publishDiagnostics"]
+    assert notifs
+    unknown_types = [
+        d for d in notifs[-1]["params"]["diagnostics"]
+        if d["message"] == "Unknown type 'Weird'"
+    ]
+
+    assert len(unknown_types) == 1
+    assert unknown_types[0]["range"]["start"]["character"] == 8
+
+
+def test_definition_finds_nested_function():
+    code = "fn outer() { fn inner() { return 1 } return inner() }\n"
+    call_col = code.rindex("inner")
+    msgs, err = run_session([
+        init_msg(),
+        open_msg("file:///nested-def.rn", code),
+        {"jsonrpc": "2.0", "id": 2, "method": "textDocument/definition",
+         "params": {"textDocument": {"uri": "file:///nested-def.rn"},
+                    "position": {"line": 0, "character": call_col}}},
+    ])
+    response = find(msgs, id=2)
+
+    assert response is not None and response.get("result") is not None
+    assert response["result"]["range"]["start"] == {"line": 0, "character": 16}
+    assert response["result"]["range"]["end"] == {"line": 0, "character": 21}
+
+
+def test_definition_finds_each_list_destructured_name():
+    code = "let [a, b] = [1, 2]\nprint(a, b)\n"
+    msgs, err = run_session([
+        init_msg(),
+        open_msg("file:///list-destructure-def.rn", code),
+        {"jsonrpc": "2.0", "id": 2, "method": "textDocument/definition",
+         "params": {"textDocument": {"uri": "file:///list-destructure-def.rn"},
+                    "position": {"line": 1, "character": 6}}},
+        {"jsonrpc": "2.0", "id": 3, "method": "textDocument/definition",
+         "params": {"textDocument": {"uri": "file:///list-destructure-def.rn"},
+                    "position": {"line": 1, "character": 9}}},
+    ])
+    first = find(msgs, id=2)
+    second = find(msgs, id=3)
+
+    assert first is not None and first.get("result") is not None
+    assert second is not None and second.get("result") is not None
+    assert first["result"]["range"]["start"] == {"line": 0, "character": 5}
+    assert second["result"]["range"]["start"] == {"line": 0, "character": 8}
+    assert first["result"]["range"]["end"] == {"line": 0, "character": 6}
+    assert second["result"]["range"]["end"] == {"line": 0, "character": 9}
+
+
+
+def test_definition_finds_each_dict_destructured_name():
+    code = 'let {a, b} = {"a": 1, "b": 2}\nprint(a, b)\n'
+    msgs, err = run_session([
+        init_msg(),
+        open_msg("file:///dict-destructure-def.rn", code),
+        {"jsonrpc": "2.0", "id": 2, "method": "textDocument/definition",
+         "params": {"textDocument": {"uri": "file:///dict-destructure-def.rn"},
+                    "position": {"line": 1, "character": 6}}},
+        {"jsonrpc": "2.0", "id": 3, "method": "textDocument/definition",
+         "params": {"textDocument": {"uri": "file:///dict-destructure-def.rn"},
+                    "position": {"line": 1, "character": 9}}},
+    ])
+    first = find(msgs, id=2)
+    second = find(msgs, id=3)
+
+    assert first is not None and first.get("result") is not None
+    assert second is not None and second.get("result") is not None
+    assert first["result"]["range"]["start"] == {"line": 0, "character": 5}
+    assert second["result"]["range"]["start"] == {"line": 0, "character": 8}
+    assert first["result"]["range"]["end"] == {"line": 0, "character": 6}
+    assert second["result"]["range"]["end"] == {"line": 0, "character": 9}
