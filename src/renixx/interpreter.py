@@ -63,6 +63,13 @@ class RenixxInstance:
     def __repr__(self):
         return "<%s instance>" % self.cls.name
 
+class RenixxSuper:
+    def __init__(self, instance, defining_class):
+        self.instance = instance
+        self.defining_class = defining_class
+    def __repr__(self):
+        return "<super of %s>" % self.defining_class.name
+
 class RenixxBoundMethod:
     def __init__(self, method_decl, instance):
         self.method_decl = method_decl
@@ -656,6 +663,10 @@ class Interpreter:
                 if env.has("this"):
                     return env.get("this")
                 raise RTError("this used outside class", expr.line)
+            if name == "super":
+                if env.has("super"):
+                    return env.get("super")
+                raise RTError("super used outside class or class has no superclass", expr.line)
             if env.has(name):
                 return env.get(name)
             # globals builtins already in globals_env
@@ -784,6 +795,19 @@ class Interpreter:
             raise RTError("Cannot slice %s" % type(obj).__name__, expr.line)
         if isinstance(expr, Member):
             obj = self.eval_expr(expr.obj, env)
+            if isinstance(obj, RenixxSuper):
+                defining = obj.defining_class
+                cur = defining.superclass if isinstance(defining.superclass, RenixxClass) else None
+                while isinstance(cur, RenixxClass):
+                    for m in cur.decl.methods:
+                        if m.name == expr.name:
+                            bind_env = Environment(cur.env if hasattr(cur, 'env') else self.globals_env)
+                            bind_env.define("this", obj.instance, mutable=True)
+                            if cur.superclass is not None and isinstance(cur.superclass, RenixxClass):
+                                bind_env.define("super", RenixxSuper(obj.instance, cur), mutable=True)
+                            return RenixxFunction(m, bind_env, self)
+                    cur = cur.superclass if isinstance(cur.superclass, RenixxClass) else None
+                raise RTError("No property '%s'" % expr.name, expr.line)
             if isinstance(obj, RenixxInstance):
                 # field?
                 if expr.name in obj.fields:
@@ -796,6 +820,8 @@ class Interpreter:
                             # bind this
                             bind_env = Environment(cls.env if hasattr(cls, 'env') else self.globals_env)
                             bind_env.define("this", obj, mutable=True)
+                            if cls.superclass is not None and isinstance(cls.superclass, RenixxClass):
+                                bind_env.define("super", RenixxSuper(obj, cls), mutable=True)
                             return RenixxFunction(m, bind_env, self)
                     cls = cls.superclass if isinstance(cls.superclass, RenixxClass) else None
                 raise RTError("No property '%s'" % expr.name, expr.line)
@@ -937,6 +963,8 @@ class Interpreter:
                 # execute init with this=instance
                 fn_env = Environment(cls.env)
                 fn_env.define("this", instance, mutable=True)
+                if cls.superclass is not None and isinstance(cls.superclass, RenixxClass):
+                    fn_env.define("super", RenixxSuper(instance, cls), mutable=True)
                 # bind params
                 params = init_method.params
                 # handle defaults/rest

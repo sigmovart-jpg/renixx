@@ -103,6 +103,11 @@ class Dog extends Animal { ... }
 let d = new Dog("Rex")
 ```
 
+`super.method(args)` calls the parent class method with the same `this`.
+`super.init(args)` calls the parent constructor. `super` always refers
+to the parent of the class where the method is defined, even when called
+on a subclass instance.
+
 ## 8. Exception handling
 
 ```

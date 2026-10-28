@@ -178,6 +178,8 @@ class SemanticAnalyzer:
                 scope.define(s.name, "class")
             new_scope = Scope(scope)
             new_scope.define("this", "variable")
+            if getattr(s, "superclass", None):
+                new_scope.define("super", "variable")
             for m in s.methods:
                 self._analyze_stmt(m, new_scope)
             for f in s.fields:
@@ -259,6 +261,16 @@ class SemanticAnalyzer:
             return
         if isinstance(e, Identifier):
             if e.name in KEYWORDS:
+                return
+            if e.name == "super":
+                if scope.lookup("super") is None:
+                    col = getattr(e, "col", 0)
+                    if col:
+                        col = max(0, col - 1)
+                    else:
+                        col = self._col_of(e.line, e.name)
+                    self._add_diag(e.line, col, "'super' is not available here (outside class or no superclass)", 1,
+                                   col + len(e.name))
                 return
             if scope.lookup(e.name) is None and e.name not in self.fn_names and e.name not in self.class_names:
                 col = getattr(e, "col", 0)

@@ -1,0 +1,14 @@
+class Animal {
+  fn init(name) { this.name = name }
+  fn speak() { return this.name }
+}
+class Dog extends Animal {
+  fn init(name, breed) {
+    super.init(name)
+    this.breed = breed
+  }
+  fn speak() { return super.speak() + " the " + this.breed }
+}
+let d = new Dog("Rex", "Husky")
+print(d.speak())
+"

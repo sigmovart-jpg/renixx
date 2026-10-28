@@ -258,6 +258,8 @@ class TypeChecker:
                 scope.define(s.name, "class")
             new_scope = Scope(scope)
             new_scope.define("this", s.name)
+            if getattr(s, "superclass", None):
+                new_scope.define("super", s.superclass)
             for f in s.fields:
                 self._check_stmt(f, new_scope)
             for m in s.methods:
@@ -425,6 +427,11 @@ class TypeChecker:
                 return "bool"
             if expr.name == "nil":
                 return "nil"
+            if expr.name == "super":
+                t = scope.lookup_type("super")
+                if t is not None:
+                    return t
+                return "unknown"
             t = scope.lookup_type(expr.name)
             if t is not None:
                 return t
