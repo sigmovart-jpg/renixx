@@ -871,25 +871,11 @@ def test_lsp_unknown_non_generic_type_uses_utf16_range():
             "file:///unknown-list-type.rn",
             "let xs: list[Foo] = []\n",
             13,
-            marks=pytest.mark.xfail(
-                strict=True,
-                reason=(
-                    "TypeChecker does not validate generic type arguments and LSP "
-                    "filters generic Unknown type diagnostics from semantics.py"
-                ),
-            ),
         ),
         pytest.param(
             "file:///unknown-dict-parameter.rn",
             "fn f(a: dict[string, Bar]) {}\n",
             21,
-            marks=pytest.mark.xfail(
-                strict=True,
-                reason=(
-                    "TypeChecker does not validate generic type arguments and LSP "
-                    "filters generic Unknown type diagnostics from semantics.py"
-                ),
-            ),
         ),
     ],
 )

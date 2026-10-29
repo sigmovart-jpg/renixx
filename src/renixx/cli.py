@@ -126,14 +126,12 @@ def _static_diagnostics(path, src, program):
               file=sys.stderr)
 
     if type_check_completed:
-        # Parameterized annotations are understood by TypeChecker but not by
-        # the older semantic analyzer, which reports them as unknown types.
+        # TypeChecker is authoritative for Unknown type diagnostics.
+        # Filter all of them from semantics to avoid duplicates.
+        # If TypeChecker failed, keep semantics' as fallback.
         semantic_diags = [
             d for d in semantic_diags
-            if not (
-                d.get("message", "").startswith("Unknown type '")
-                and "[" in d.get("message", "")
-            )
+            if not d.get("message", "").startswith("Unknown type '")
         ]
 
     return _merge_diagnostics(semantic_diags, type_diags)
