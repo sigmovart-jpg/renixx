@@ -93,14 +93,13 @@ def analyze(uri, text):
         # Don't crash LSP on type checker errors
         pass
     if type_check_completed:
-        # Generic annotations are validated by TypeChecker; the older
-        # semantic analyzer does not understand parameterized type syntax.
+        # TypeChecker is the authoritative source for Unknown type diagnostics
+        # (handles generics). Filter all Unknown type from semantics to avoid
+        # duplicates. If TypeChecker failed, keep semantics' diagnostics as
+        # a safe fallback.
         sem_diags = [
             d for d in sem_diags
-            if not (
-                d.get("message", "").startswith("Unknown type '")
-                and "[" in d.get("message", "")
-            )
+            if not d.get("message", "").startswith("Unknown type '")
         ]
     # combine and deduplicate diagnostics
     all_diags = list(sem_diags) + list(type_diags)

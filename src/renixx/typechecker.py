@@ -105,6 +105,7 @@ class TypeChecker:
         self.diagnostics = []
         self.fn_types = {}  # function name -> (param_types, return_type)
         self.class_types = {}  # class name -> {methods, fields}
+        self.known_types = set(TYPE_NAMES)  # populated in _collect_types
 
     def _col(self, node, name=None):
         """Get 0-based column for a node or name."""
@@ -156,6 +157,14 @@ class TypeChecker:
     def _collect_types(self, program):
         """First pass: collect function signatures and class info."""
         for stmt in program.statements:
+            if isinstance(stmt, ClassDecl) and stmt.name:
+                self.known_types.add(stmt.name)
+            if isinstance(stmt, ImportStmt):
+                if stmt.names:
+                    for n in stmt.names:
+                        self.known_types.add(n)
+                elif stmt.alias:
+                    self.known_types.add(stmt.alias)
             if isinstance(stmt, FnDecl) and stmt.name:
                 params = []
                 for p in stmt.params:
@@ -194,16 +203,15 @@ class TypeChecker:
             return
         if isinstance(s, LetStmt):
             val_type = "unknown"
+            if s.type_annot:
+                base_col = getattr(s, "type_annot_col", 0)
+                base_col = max(0, base_col - 1) if base_col else self._col_of(s.line, s.type_annot)
+                self._validate_type_str(s.type_annot, base_col, s.line)
             if s.value is not None:
                 val_type = self._infer_type(s.value, scope)
                 if s.type_annot:
                     base_type = s.type_annot.split("[")[0].strip()
-                    if base_type not in TYPE_NAMES:
-                        col = getattr(s, "type_annot_col", 0)
-                        col = max(0, col - 1) if col else self._col_of(s.line, s.type_annot)
-                        self._add_diag(s.line, col, "Unknown type '%s'" % s.type_annot, 2,
-                                       col + len(s.type_annot))
-                    elif not self._compatible(val_type, s.type_annot) and not (s.type_annot.startswith("list[") and isinstance(s.value, ListLiteral) and val_type.split("[")[0].strip() == s.type_annot.split("[")[0].strip()) and not (s.type_annot.startswith("dict[") and isinstance(s.value, DictLiteral) and val_type.split("[")[0].strip() == s.type_annot.split("[")[0].strip()):
+                    if base_type in self.known_types and not self._compatible(val_type, s.type_annot) and not (s.type_annot.startswith("list[") and isinstance(s.value, ListLiteral) and val_type.split("[")[0].strip() == s.type_annot.split("[")[0].strip()) and not (s.type_annot.startswith("dict[") and isinstance(s.value, DictLiteral) and val_type.split("[")[0].strip() == s.type_annot.split("[")[0].strip()):
                         col = getattr(s, "name_col", 0)
                         col = max(0, col - 1) if col else self._col_of(s.line, s.name)
                         self._add_diag(s.line, col,
@@ -235,19 +243,19 @@ class TypeChecker:
                 pname = p[0]
                 annot = p[3] if len(p) > 3 else None
                 annot_col = p[4] if len(p) > 4 else 0
-                if annot and annot.split("[")[0].strip() not in TYPE_NAMES:
-                    col = max(0, annot_col - 1) if annot_col else self._col_of(s.line, annot)
-                    self._add_diag(s.line, col, "Unknown type '%s'" % annot, 2,
-                                   col + len(annot))
+                if annot:
+                    annot_line = p[5] if len(p) > 5 else 0
+                    diag_line = annot_line if annot_line else s.line
+                    base_col = max(0, annot_col - 1) if annot_col else self._col_of(diag_line, annot)
+                    self._validate_type_str(annot, base_col, diag_line)
                 ptype = annot if annot else "unknown"
                 new_scope.define(pname, ptype)
             if getattr(s, "return_type", None):
-                base_type = s.return_type.split("[")[0].strip()
-                if base_type not in TYPE_NAMES:
-                    rtc = getattr(s, "return_type_col", 0)
-                    col = max(0, rtc - 1) if rtc else self._col_of(s.line, s.return_type)
-                    self._add_diag(s.line, col, "Unknown type '%s'" % s.return_type, 2,
-                                   col + len(s.return_type))
+                rtc = getattr(s, "return_type_col", 0)
+                rtl = getattr(s, "return_type_line", 0)
+                diag_line = rtl if rtl else s.line
+                base_col = max(0, rtc - 1) if rtc else self._col_of(diag_line, s.return_type)
+                self._validate_type_str(s.return_type, base_col, diag_line)
             if isinstance(s.body, Block):
                 self._check_stmts(s.body.statements, new_scope)
             if s.return_type and s.return_type.split("[")[0].strip() in TYPE_NAMES:
@@ -664,6 +672,30 @@ class TypeChecker:
             return "unknown"
         return "unknown"
 
+    def _validate_type_str(self, type_str, base_col, line):
+        """Validate all type identifiers in a type string. Report unknown types."""
+        if not type_str:
+            return
+        type_str = type_str.strip()
+        # Walk through the string, identify identifiers
+        i = 0
+        n = len(type_str)
+        while i < n:
+            ch = type_str[i]
+            if ch.isalpha() or ch == "_":
+                # read identifier
+                j = i
+                while j < n and (type_str[j].isalnum() or type_str[j] == "_"):
+                    j += 1
+                name = type_str[i:j]
+                if name and name not in self.known_types:
+                    col = base_col + i
+                    self._add_diag(line, col, "Unknown type '%s'" % name, 2,
+                                   col + len(name))
+                i = j
+            else:
+                i += 1
+
     def _compatible(self, source, target):
         src = parse_type(source) if isinstance(source, str) else source
         tgt = parse_type(target) if isinstance(target, str) else target
@@ -701,7 +733,8 @@ class TypeChecker:
                 # Only report top-level mismatch if base types differ
                 elem_base = elem_type.split("[")[0].strip() if elem_type else ""
                 actual_base = actual.split("[")[0].strip() if actual else ""
-                if (actual not in ("unknown", "any")
+                if (elem_type in self.known_types
+                        and actual not in ("unknown", "any")
                         and elem_base != actual_base
                         and not self._compatible(actual, elem_type)):
                     col = getattr(elem, "col", 0)
@@ -736,7 +769,8 @@ class TypeChecker:
                     av = self._infer_type(v, scope)
                     ak_base = key_type.split("[")[0].strip() if key_type else ""
                     actual_ak_base = ak.split("[")[0].strip() if ak else ""
-                    if (ak not in ("unknown", "any")
+                    if (key_type in self.known_types
+                            and ak not in ("unknown", "any")
                             and ak_base != actual_ak_base
                             and not self._compatible(ak, key_type)):
                         col = getattr(k, "col", 0)
@@ -745,7 +779,8 @@ class TypeChecker:
                                        "Type error: expected %s, got %s" % (key_type, ak), 1)
                     av_base = val_type.split("[")[0].strip() if val_type else ""
                     actual_av_base = av.split("[")[0].strip() if av else ""
-                    if (av not in ("unknown", "any")
+                    if (val_type in self.known_types
+                            and av not in ("unknown", "any")
                             and av_base != actual_av_base
                             and not self._compatible(av, val_type)):
                         col = getattr(v, "col", 0)

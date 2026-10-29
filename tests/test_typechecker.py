@@ -509,3 +509,63 @@ def test_unknown_no_check():
     diags = check('let x = [1, 2, 3]\nlet y: string = x[0]\n')
     assert len(diags) == 1
     assert "Type error" in diags[0]["message"]
+
+
+# ---- Unknown type name validation (generic) ----
+
+def test_unknown_nested_list():
+    diags = check("let xs: list[list[Foo]] = [[]]\n")
+    assert len(diags) == 1
+    assert "Unknown type 'Foo'" in diags[0]["message"]
+    assert diags[0]["col"] == 18
+
+def test_unknown_dict_key():
+    diags = check('let d: dict[Foo, int] = {"a": 1}\n')
+    assert len(diags) == 1
+    assert "Unknown type 'Foo'" in diags[0]["message"]
+    assert diags[0]["col"] == 12
+
+def test_unknown_dict_value_nested():
+    diags = check('let d: dict[string, list[Bar]] = {"a": []}\n')
+    assert len(diags) == 1
+    assert "Unknown type 'Bar'" in diags[0]["message"]
+
+def test_unknown_return_type():
+    diags = check("fn f() -> Foo { return 1 }\n")
+    assert len(diags) == 1
+    assert "Unknown type 'Foo'" in diags[0]["message"]
+
+def test_unknown_param_type():
+    diags = check("fn f(x: Foo) {}\n")
+    assert len(diags) == 1
+    assert "Unknown type 'Foo'" in diags[0]["message"]
+
+def test_unknown_method_param():
+    diags = check("class A { fn m(x: Foo) {} }\n")
+    assert len(diags) == 1
+    assert "Unknown type 'Foo'" in diags[0]["message"]
+
+def test_class_name_valid_type():
+    diags = check("class Dog {}\nlet a: Dog = 1\n")
+    unknown = [d for d in diags if "Unknown type" in d["message"]]
+    assert unknown == []
+
+def test_forward_ref_class():
+    diags = check("fn f(x: Foo) {}\nclass Foo {}\n")
+    unknown = [d for d in diags if "Unknown type" in d["message"]]
+    assert unknown == []
+
+def test_import_no_diagnostic():
+    diags = check('from "lib.rn" import Foo\nlet x: Foo = 1\n')
+    unknown = [d for d in diags if "Unknown type" in d["message"]]
+    assert unknown == []
+
+def test_no_false_positive_valid_generics():
+    diags = check("let xs: list[int] = [1, 2, 3]\nlet d: dict[string, int] = {\"a\": 1}\nfn f() -> list[int] { return [1] }\n")
+    unknown = [d for d in diags if "Unknown type" in d["message"]]
+    assert unknown == []
+
+def test_unknown_multiple_names():
+    diags = check("let x: Foo = 1\nlet y: Bar = 2\n")
+    unknown = [d for d in diags if "Unknown type" in d["message"]]
+    assert len(unknown) == 2

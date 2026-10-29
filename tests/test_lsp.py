@@ -13,7 +13,7 @@ SRC = os.path.join(ROOT, "src")
 PYTHON = sys.executable
 
 
-def run_session(messages, wait=1.0, text=None):
+def run_session(messages, timeout=5.0):
     proc = subprocess.Popen(
         [PYTHON, "-m", "renixx", "lsp"],
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -49,19 +49,41 @@ def run_session(messages, wait=1.0, text=None):
                 q.put({"_raw": body.decode(errors="replace")})
 
     threading.Thread(target=reader, daemon=True).start()
-    time.sleep(0.2)
+    expected = []
     for m in messages:
         body = json.dumps(m)
         proc.stdin.write(("Content-Length: %d\r\n\r\n" % len(body.encode()) + body).encode())
         proc.stdin.flush()
-        time.sleep(0.2)
-    time.sleep(wait)
+        if m.get("id") is not None:
+            expected.append(("id", m["id"]))
+        elif m.get("method") in ("textDocument/didOpen", "textDocument/didChange"):
+            expected.append(("diagnostics", m["params"]["textDocument"]["uri"]))
+
+    msgs = []
+    for kind, value in expected:
+        deadline = time.monotonic() + timeout
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            try:
+                response = q.get(timeout=remaining)
+            except queue.Empty:
+                break
+            msgs.append(response)
+            if kind == "id" and response.get("id") == value:
+                break
+            if (kind == "diagnostics"
+                    and response.get("method") == "textDocument/publishDiagnostics"
+                    and response.get("params", {}).get("uri") == value):
+                break
+
     proc.stdin.close()
     try:
         proc.wait(timeout=5)
     except subprocess.TimeoutExpired:
         proc.kill()
-    msgs = []
+        proc.wait(timeout=5)
     while not q.empty():
         msgs.append(q.get())
     stderr = proc.stderr.read().decode(errors="replace")
@@ -642,7 +664,7 @@ def test_shutdown_exit():
     msgs, err = run_session([
         init_msg(),
         {"jsonrpc": "2.0", "id": 2, "method": "shutdown", "params": {}},
-    ], wait=0.5)
+    ])
     m = find(msgs, id=2)
     assert m is not None and m.get("result") is None
 
@@ -817,6 +839,79 @@ def test_lsp_parameterized_diagnostic_range_uses_utf16_after_emoji():
         "line": 0,
         "character": data_col + 1 + len("data"),
     }
+
+def test_lsp_unknown_non_generic_type_uses_utf16_range():
+    code = 'let s = "😀"; let x: Foo = 1\n'
+    py_col = code.index("Foo")
+    utf16_col = len(code[:py_col].encode("utf-16-le")) // 2
+    msgs, err = run_session([
+        init_msg(),
+        open_msg("file:///unknown-type-emoji.rn", code),
+    ])
+    notifs = [m for m in msgs if m.get("method") == "textDocument/publishDiagnostics"]
+    assert notifs
+    matches = [
+        diagnostic
+        for diagnostic in notifs[-1]["params"]["diagnostics"]
+        if diagnostic["message"] == "Unknown type 'Foo'"
+    ]
+
+    assert len(matches) == 1
+    assert matches[0]["range"]["start"] == {"line": 0, "character": utf16_col}
+    assert matches[0]["range"]["end"] == {
+        "line": 0,
+        "character": utf16_col + len("Foo"),
+    }
+
+
+@pytest.mark.parametrize(
+    ("uri", "code", "unknown_col"),
+    [
+        pytest.param(
+            "file:///unknown-list-type.rn",
+            "let xs: list[Foo] = []\n",
+            13,
+        ),
+        pytest.param(
+            "file:///unknown-dict-parameter.rn",
+            "fn f(a: dict[string, Bar]) {}\n",
+            21,
+        ),
+    ],
+)
+def test_lsp_unknown_generic_argument_has_precise_diagnostic(uri, code, unknown_col):
+    msgs, err = run_session([init_msg(), open_msg(uri, code)])
+    notifs = [m for m in msgs if m.get("method") == "textDocument/publishDiagnostics"]
+    assert notifs
+    unknown_types = [
+        diagnostic
+        for diagnostic in notifs[-1]["params"]["diagnostics"]
+        if diagnostic["message"].startswith("Unknown type")
+    ]
+
+    assert len(unknown_types) == 1
+    assert unknown_types[0]["range"]["start"] == {
+        "line": 0,
+        "character": unknown_col,
+    }
+    assert unknown_types[0]["range"]["end"] == {
+        "line": 0,
+        "character": unknown_col + 3,
+    }
+
+
+def test_lsp_hover_shows_full_generic_type_with_unknown_argument():
+    code = "let xs: list[Foo] = []\nprint(xs)\n"
+    msgs, err = run_session([
+        init_msg(),
+        open_msg("file:///hover-unknown-generic.rn", code),
+        {"jsonrpc": "2.0", "id": 2, "method": "textDocument/hover",
+         "params": {"textDocument": {"uri": "file:///hover-unknown-generic.rn"},
+                    "position": {"line": 1, "character": 7}}},
+    ])
+    hover = find(msgs, id=2)["result"]
+
+    assert "xs: list[Foo]" in hover["contents"]["value"]
 
 
 def test_lsp_type_checker_no_crash_on_bad_code():
