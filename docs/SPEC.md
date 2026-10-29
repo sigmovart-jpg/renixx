@@ -39,6 +39,12 @@ and or not extends is`
 
 Arithmetic: `+ - * / % **`
 Comparison: `== != === !== < > <= >=`
+
+Type check: `is` (e.g. `x is int`, `x is string`, `x is list`). Checks the
+runtime type of the left operand. Supported type names: `int`, `float`,
+`string`, `bool`, `list`, `dict`, `function`, `instance`. `int` matches
+`bool`, `float` matches `int`. If the right operand is not a type name,
+`is` performs identity comparison.
 Logical: `and or not && || !`
 Assignment: `= += -= *= /= %=`
 Other: `.` (member), `[]` (index), `()` (call), `? :` (ternary),

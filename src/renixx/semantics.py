@@ -101,6 +101,11 @@ class SemanticAnalyzer:
         nothing. Both are declarations, so they must not be analyzed as
         variable uses. Any other pattern form is an expression.
         """
+        if isinstance(pat, ListLiteral):
+            for elem in pat.elements:
+                self._register_pattern_bindings(elem, scope)
+            return True
+
         if not isinstance(pat, Identifier):
             return False
         if pat.name != "_":
@@ -293,6 +298,8 @@ class SemanticAnalyzer:
             return
         if isinstance(e, BinaryOp):
             self._analyze_expr(e.left, scope)
+            if e.op == 'is' and isinstance(e.right, Identifier) and e.right.name in ('int', 'float', 'string', 'bool', 'list', 'dict', 'function', 'instance'):
+                return
             self._analyze_expr(e.right, scope)
             return
         if isinstance(e, Assign):

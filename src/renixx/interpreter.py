@@ -753,7 +753,7 @@ class Interpreter:
                     return l
                 return self.eval_expr(expr.right, env)
             l = self.eval_expr(expr.left, env)
-            if op if False else (expr.op == "is" and isinstance(expr.right, Identifier) and expr.right.name in ("int", "float", "string", "bool", "list", "dict", "nil", "function", "class", "instance")):
+            if op if False else (expr.op == "is" and isinstance(expr.right, Identifier) and expr.right.name in ("int", "float", "string", "bool", "list", "dict", "function", "instance")):
                 r = None
             else:
                 r = self.eval_expr(expr.right, env)
@@ -813,7 +813,7 @@ class Interpreter:
                 return self._compare(l, r, op, line, col)
             if op == "is":
                 # Type check: if right side is a type name, check runtime type
-                if isinstance(expr.right, Identifier) and expr.right.name in ("int", "float", "string", "bool", "list", "dict", "nil", "function", "class", "instance"):
+                if isinstance(expr.right, Identifier) and expr.right.name in ("int", "float", "string", "bool", "list", "dict", "function", "instance"):
                     type_name = expr.right.name
                     actual = self._type(l)
                     # normalize: bool is subtype of int
