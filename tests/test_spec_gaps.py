@@ -22,7 +22,6 @@ def test_match_binding():
     src = "match 5 { n if n > 3 => { print(n) } _ => { print(\"no\") } }"
     assert run(src) == ["5"]
 
-@pytest.mark.xfail(strict=True, reason="list pattern binding not supported")
 def test_match_list_pattern():
     src = "match [1,2] { [a,b] => { print(a,b) } _ => { print(\"no\") } }"
     assert run(src) == ["1 2"]
@@ -75,15 +74,12 @@ def test_const_reassign():
     e = run_err("const c=1\nc=2")
     assert isinstance(e, RenixxError) and e.line is not None
 
-@pytest.mark.xfail(strict=True, reason="is operator false for int")
 def test_is_int():
     assert run("print(1 is int)") == ["true"]
 
-@pytest.mark.xfail(strict=True, reason="is operator unsupported for string")
 def test_is_string():
     assert run('print("a" is string)') == ["true"]
 
-@pytest.mark.xfail(strict=True, reason="is operator unsupported for list")
 def test_is_list():
     assert run("print([] is list)") == ["true"]
 

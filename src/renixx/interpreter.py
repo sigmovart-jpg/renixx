@@ -661,6 +661,16 @@ class Interpreter:
         # pat is an Expr (Literal, Identifier, etc.)
         if isinstance(pat, Literal):
             return pat.value == val
+        if isinstance(pat, ListLiteral):
+            if not isinstance(val, (list, tuple)):
+                return False
+            if len(pat.elements) != len(val):
+                return False
+            for pe, ve in zip(pat.elements, val):
+                if not self._match_pattern(pe, ve, env):
+                    return False
+            return True
+
         if isinstance(pat, Identifier):
             if pat.name == "_":
                 # wildcard: always matches, no binding
@@ -743,7 +753,10 @@ class Interpreter:
                     return l
                 return self.eval_expr(expr.right, env)
             l = self.eval_expr(expr.left, env)
-            r = self.eval_expr(expr.right, env)
+            if op if False else (expr.op == "is" and isinstance(expr.right, Identifier) and expr.right.name in ("int", "float", "string", "bool", "list", "dict", "nil", "function", "class", "instance")):
+                r = None
+            else:
+                r = self.eval_expr(expr.right, env)
             op = expr.op
             line, col = self._pos(expr)
             if op == "+":
@@ -799,6 +812,16 @@ class Interpreter:
             if op in ("<", ">", "<=", ">="):
                 return self._compare(l, r, op, line, col)
             if op == "is":
+                # Type check: if right side is a type name, check runtime type
+                if isinstance(expr.right, Identifier) and expr.right.name in ("int", "float", "string", "bool", "list", "dict", "nil", "function", "class", "instance"):
+                    type_name = expr.right.name
+                    actual = self._type(l)
+                    # normalize: bool is subtype of int
+                    if type_name == "int" and actual == "bool":
+                        return True
+                    if type_name == "float" and actual == "int":
+                        return True
+                    return actual == type_name
                 return l is r
             if op == "in":
                 if isinstance(r, (list, tuple, str, dict)):
