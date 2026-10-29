@@ -39,6 +39,28 @@ def test_fn():
 def test_lambda():
     assert run('let d=x=>x*2\nprint(d(7))') == ["14"]
 
+def test_lambda_empty_dict_body():
+    source = (
+        "let f = x => {}\n"
+        "let g = () => {}\n"
+        "let h = (a, b) => {}\n"
+        "print(f(1))\n"
+        "print(g())\n"
+        "print(h(1, 2))\n"
+    )
+    assert run(source) == ["{}", "{}", "{}"]
+
+def test_empty_dict_lambda_preserves_dict_and_function_blocks():
+    source = (
+        "let empty = {}\n"
+        'let make = value => {"value": value}\n'
+        "fn noop() {}\n"
+        "print(empty)\n"
+        "print(make(2))\n"
+        'print("block preserved")\n'
+    )
+    assert run(source) == ["{}", "{value: 2}", "block preserved"]
+
 def test_recursion():
     assert run('fn f(n){if n<=1{return 1}return n*f(n-1)}\nprint(f(5))') == ["120"]
 
