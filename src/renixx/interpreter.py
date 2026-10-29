@@ -160,8 +160,11 @@ class Interpreter:
         if isinstance(x, dict): return "dict"
         if isinstance(x, RenixxFunction): return "function"
         if isinstance(x, RenixxLambda): return "function"
+        if isinstance(x, RenixxBoundMethod): return "function"
+        if isinstance(x, RenixxSuper): return "super"
         if isinstance(x, RenixxClass): return "class"
         if isinstance(x, RenixxInstance): return "instance"
+        if callable(x): return "function"
         return "unknown"
 
     def _str(self, x):

@@ -721,7 +721,9 @@ class Parser:
             if self.allow_lambda and self.peek(1).type == "OP" and self.peek(1).value == "=>":
                 self.advance()
                 self.advance()  # =>
+                self._in_lambda_body = True
                 body = self.parse_expression()
+                self._in_lambda_body = False
                 return Lambda(params=[(tok.value, None, False, None, 0, 0)], body=body, line=tok.line)
             self.advance()
             return Identifier(name=tok.value, line=tok.line, col=tok.col)
@@ -839,7 +841,11 @@ class Parser:
             self.advance()
             self.skip_newlines()
             is_dict = False
-            if self.current().type != "RBRACE":
+            if getattr(self, "_in_lambda_body", False) and self.current().type == "RBRACE":
+                is_dict = False  # keep {} as non-dict in lambda body
+            elif self.current().type == "RBRACE":
+                is_dict = True  # empty dict
+            else:
                 try:
                     self.parse_expression()
                     if self.current().type == "OP" and self.current().value == ":":
@@ -850,6 +856,10 @@ class Parser:
             if is_dict:
                 self.advance()
                 self.skip_newlines()
+                # empty dict
+                if self.current().type == "RBRACE":
+                    self.expect("RBRACE", "}")
+                    return DictLiteral(pairs=[], line=tok.line, col=tok.col)
                 # check comprehension: {key: val for var in iterable if cond}
                 # parse first pair first
                 self.skip_newlines()
