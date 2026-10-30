@@ -394,9 +394,18 @@ class Parser:
             guard = None
             if self.current().type == "KEYWORD" and self.current().value == "if":
                 self.advance()
-                self.allow_lambda = False
-                guard = self.parse_expression()
+                saved_pos = self.pos
                 self.allow_lambda = True
+                guard = self.parse_expression()
+                if not (self.current().type == "OP" and self.current().value in ("=>", "->")):
+                    # lambda consumed the arrow; retry without lambda
+                    self.pos = saved_pos
+                    self.allow_lambda = False
+                    guard = self.parse_expression()
+                    self.allow_lambda = True
+                # expect the arrow after guard
+                if not (self.current().type == "OP" and self.current().value in ("=>", "->")):
+                    pass
             self.skip_newlines()
             if self.current().type == "OP" and self.current().value in ("=>", "->"):
                 self.advance()
@@ -605,8 +614,10 @@ class Parser:
     def parse_postfix(self):
         expr = self.parse_primary()
         while True:
-            if self.current().type == "LBRACKET" and self.current().line != expr.line:
-                break
+            if self.current().type == "LBRACKET":
+                last_token = self.tokens[self.pos - 1]
+                if self.current().line != last_token.line:
+                    break
             if self.current().type == "LPAREN":
                 self.advance()
                 args, kwargs = self.parse_call_args()
