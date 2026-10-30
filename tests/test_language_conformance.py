@@ -298,3 +298,80 @@ def test_formatting_preserves_multi_arm_match_behavior():
     parse(formatted)
     assert format_source(formatted) == formatted
     assert run_program(formatted) == run_program(source) == ["two"]
+
+
+def test_formatting_roundtrip_guard_block_body():
+    source = (
+        "match [2, 1] {\n"
+        "  [a, b] if a > b => { print(\"desc\") }\n"
+        "  _ => { print(\"other\") }\n"
+        "}\n"
+    )
+    formatted = format_source(source)
+    reformatted = format_source(formatted)
+    parse(formatted)
+    assert reformatted == formatted
+    assert run_program(formatted) == run_program(source) == ["desc"]
+
+
+def test_formatting_roundtrip_guard_expression_body():
+    source = (
+        "match [2, 1] {\n"
+        "  [a, b] if a > b => print(\"desc\")\n"
+        "  _ => print(\"other\")\n"
+        "}\n"
+    )
+    formatted = format_source(source)
+    reformatted = format_source(formatted)
+    parse(formatted)
+    assert reformatted == formatted
+    assert run_program(formatted) == run_program(source) == ["desc"]
+
+
+def test_formatting_roundtrip_guard_with_lambda():
+    source = (
+        "let xs = [1]\n"
+        "match xs {\n"
+        "  ys if len(ys.map(x => x + 1)) > 0 => print(\"ok\")\n"
+        "  _ => print(\"no\")\n"
+        "}\n"
+    )
+    formatted = format_source(source)
+    reformatted = format_source(formatted)
+    parse(formatted)
+    assert reformatted == formatted
+    assert run_program(formatted) == run_program(source) == ["ok"]
+
+
+def test_formatting_roundtrip_multi_arm_list_patterns_expression_body():
+    source = (
+        "let result = 0\n"
+        "let x = [1, 2]\n"
+        "match x {\n"
+        "  [a] => result = 1\n"
+        "  [a, b] => result = 2\n"
+        "  _ => result = 9\n"
+        "}\n"
+        "print(result)\n"
+    )
+    formatted = format_source(source)
+    reformatted = format_source(formatted)
+    parse(formatted)
+    assert reformatted == formatted
+    assert run_program(formatted) == run_program(source) == ["2"]
+
+
+def test_formatting_roundtrip_multi_arm_list_patterns_block_body():
+    source = (
+        "let x = [1, 2]\n"
+        "match x {\n"
+        "  [a] => { print(a) }\n"
+        "  [a, b] => { print(a, b) }\n"
+        "  _ => { print(0) }\n"
+        "}\n"
+    )
+    formatted = format_source(source)
+    reformatted = format_source(formatted)
+    parse(formatted)
+    assert reformatted == formatted
+    assert run_program(formatted) == run_program(source) == ["1 2"]

@@ -145,6 +145,99 @@ def test_undefined_method():
     assert run(src) == ["caught"]
 
 
+# --- match guards and list patterns (regression) ---
+
+def test_match_guard_block_body():
+    src = (
+        "match [2, 1] {\n"
+        "    [a, b] if a > b => { print(\"desc\") }\n"
+        "    _ => { print(\"other\") }\n"
+        "}\n"
+    )
+    assert run(src) == ["desc"]
+
+
+def test_match_guard_expression_body():
+    src = (
+        "match [2, 1] {\n"
+        "    [a, b] if a > b => print(\"desc\")\n"
+        "    _ => print(\"other\")\n"
+        "}\n"
+    )
+    assert run(src) == ["desc"]
+
+
+def test_match_guard_with_lambda():
+    src = (
+        "let xs = [1]\n"
+        "match xs {\n"
+        "    ys if len(ys.map(x => x + 1)) > 0 => print(\"ok\")\n"
+        "    _ => print(\"no\")\n"
+        "}\n"
+    )
+    assert run(src) == ["ok"]
+
+
+def test_match_multi_arm_list_patterns_expression_body():
+    src = (
+        "let result = 0\n"
+        "let x = [1, 2]\n"
+        "match x {\n"
+        "    [a] => result = 1\n"
+        "    [a, b] => result = 2\n"
+        "    _ => result = 9\n"
+        "}\n"
+        "print(result)\n"
+    )
+    assert run(src) == ["2"]
+
+    src2 = (
+        "let result = 0\n"
+        "let x = [1, 2, 3]\n"
+        "match x {\n"
+        "    [a] => result = 1\n"
+        "    [a, b] => result = 2\n"
+        "    _ => result = 9\n"
+        "}\n"
+        "print(result)\n"
+    )
+    assert run(src2) == ["9"]
+
+
+def test_match_multi_arm_list_patterns_block_body():
+    src = (
+        "let x = [1, 2]\n"
+        "match x {\n"
+        "    [a] => { print(a) }\n"
+        "    [a, b] => { print(a, b) }\n"
+        "    _ => { print(0) }\n"
+        "}\n"
+    )
+    assert run(src) == ["1 2"]
+
+
+def test_postfix_after_multiline_call():
+    src = (
+        "let f = x => [10, 20]\n"
+        "let v = f(\n"
+        "1\n"
+        ")[0]\n"
+        "print(v)\n"
+    )
+    assert run(src) == ["10"]
+
+
+def test_postfix_after_multiline_list_literal():
+    src = (
+        "let v = [\n"
+        "10,\n"
+        "20\n"
+        "][1]\n"
+        "print(v)\n"
+    )
+    assert run(src) == ["20"]
+
+
 # ---------- Parameterized type annotations (parser) ----------
 
 from renixx.parser import parse as _parse
