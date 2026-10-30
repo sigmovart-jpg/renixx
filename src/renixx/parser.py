@@ -395,17 +395,20 @@ class Parser:
             if self.current().type == "KEYWORD" and self.current().value == "if":
                 self.advance()
                 saved_pos = self.pos
-                self.allow_lambda = True
-                guard = self.parse_expression()
-                if not (self.current().type == "OP" and self.current().value in ("=>", "->")):
-                    # lambda consumed the arrow; retry without lambda
+                saved_allow = self.allow_lambda
+                try:
+                    self.allow_lambda = True
+                    guard = self.parse_expression()
+                    if not (self.current().type == "OP" and self.current().value in ("=>", "->")):
+                        # lambda consumed the arrow; retry without lambda
+                        raise ParseError("guard consumed arrow", self.current().line, self.current().col)
+                except ParseError:
                     self.pos = saved_pos
                     self.allow_lambda = False
                     guard = self.parse_expression()
-                    self.allow_lambda = True
-                # expect the arrow after guard
-                if not (self.current().type == "OP" and self.current().value in ("=>", "->")):
-                    pass
+                    self.allow_lambda = saved_allow
+                else:
+                    self.allow_lambda = saved_allow
             self.skip_newlines()
             if self.current().type == "OP" and self.current().value in ("=>", "->"):
                 self.advance()
