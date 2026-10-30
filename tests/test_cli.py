@@ -188,3 +188,30 @@ def test_fmt_reports_syntax_error(capsys, tmp_path):
     assert path in err
     assert "ParseError" in err
     assert "Traceback" not in err
+
+
+def test_fmt_write_preserves_list_pattern_match_program(tmp_path):
+    from renixx.formatter import format_source
+    from renixx.interpreter import Interpreter
+    from renixx.parser import parse
+
+    source = (
+        "let x = [1, 2]\n"
+        "match x {\n"
+        "  [a] => { print(a) }\n"
+        "  [a, b] => { print(a, b) }\n"
+        "  _ => { print(0) }\n"
+        "}\n"
+    )
+    path = _write(tmp_path, "match_list_patterns.rn", source)
+
+    assert main(["fmt", path, "-w"]) == 0
+    formatted = open(path, encoding="utf-8").read()
+    parse(formatted)
+    assert format_source(formatted) == formatted
+
+    original = Interpreter()
+    original.run(parse(source))
+    after_format = Interpreter()
+    after_format.run(parse(formatted))
+    assert after_format.output == original.output == ["1 2"]

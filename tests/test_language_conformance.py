@@ -262,3 +262,39 @@ def test_formatting_preserves_behavior_and_formatted_code_reparses(source):
 
     parse(formatted)
     assert run_program(formatted) == run_program(source)
+
+
+def test_formatting_preserves_list_pattern_match_blocks():
+    source = (
+        "let x = [1, 2]\n"
+        "match x {\n"
+        "  [a] => { print(a) }\n"
+        "  [a, b] => { print(a, b) }\n"
+        "  _ => { print(0) }\n"
+        "}\n"
+    )
+
+    formatted = format_source(source)
+    reformatted = format_source(formatted)
+
+    assert "[a] => {\n" in formatted
+    assert "[a, b] => {\n" in formatted
+    parse(formatted)
+    assert reformatted == formatted
+    assert run_program(formatted) == run_program(source) == ["1 2"]
+
+
+def test_formatting_preserves_multi_arm_match_behavior():
+    source = (
+        'match 2 {\n'
+        '  1 => { print("one") }\n'
+        '  2 => { print("two") }\n'
+        '  _ => { print("other") }\n'
+        '}\n'
+    )
+
+    formatted = format_source(source)
+
+    parse(formatted)
+    assert format_source(formatted) == formatted
+    assert run_program(formatted) == run_program(source) == ["two"]

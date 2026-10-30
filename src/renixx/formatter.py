@@ -86,7 +86,12 @@ class Formatter:
                     r += self.pad() + self.expr(pat)
                     if guard is not None:
                         r += " if " + self.expr(guard)
-                r += " => " + self.block_inline(body) + "\n"
+                formatted_body = (
+                    self.block(body)
+                    if isinstance(body, Block)
+                    else self.block_inline(body)
+                )
+                r += " => " + formatted_body + "\n"
             self.level -= 1
             r += self.pad() + "}"
             return self.pad() + r
